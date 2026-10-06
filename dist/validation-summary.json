@@ -1,0 +1,22 @@
+{
+  "plugin_version": "1.0.1",
+  "calibre_version": "9.15",
+  "source_archive": "takeout-20250107T221758Z-003.zip",
+  "books_recovered": 51,
+  "books_imported": 51,
+  "import_errors": 0,
+  "formats": {
+    "epub": 47,
+    "pdf": 4
+  },
+  "mislabeled_pdf_to_epub": 16,
+  "books_with_known_authors": 48,
+  "books_with_covers": 51,
+  "scope": "January part 003 only; full October export not tested",
+  "text_pdf_preservation_passed": 2,
+  "image_pdf_conversion": {
+    "passed": 2,
+    "pages_per_comic": 45,
+    "imported_as": "CBZ"
+  }
+}
