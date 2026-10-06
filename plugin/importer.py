@@ -1,6 +1,50 @@
 """Import recovered formats through Calibre's database and metadata readers."""
 from pathlib import Path
 
+def repair_library_books(gui, book_ids, comics=False):
+    """Repair formats already stored in the current Calibre library."""
+    from calibre.ebooks.metadata.meta import get_metadata
+    from calibre_plugins.takeout_book_fixer.core import detect, image_pdf_to_cbz
+    from tempfile import TemporaryDirectory
+    db = gui.current_db.new_api
+    repaired, skipped, errors = [], [], []
+    with TemporaryDirectory(prefix='takeout-book-fixer-') as tmp:
+        for book_id in book_ids:
+            try:
+                for old_fmt in list(db.formats(book_id) or ()):
+                    old_fmt = old_fmt.lower()
+                    data = db.format(book_id, old_fmt.upper())
+                    if not data:
+                        continue
+                    kind = detect(data)
+                    if kind == 'cbr' and old_fmt != 'cbr':
+                        kind = None
+                    if comics and kind == 'pdf':
+                        converted = image_pdf_to_cbz(data)
+                        if converted is not None:
+                            data, kind = converted, 'cbz'
+                    if kind is None or kind == old_fmt:
+                        skipped.append(book_id)
+                        continue
+                    new_fmt = kind.upper()
+                    from io import BytesIO
+                    if not db.add_format(book_id, new_fmt, BytesIO(data), replace=False):
+                        raise ValueError('Calibre could not save corrected format')
+                    try:
+                        mi = get_metadata(__import__('io').BytesIO(data), stream_type=kind)
+                        if mi.title:
+                            db.set_metadata(book_id, mi)
+                    except Exception:
+                        pass
+                    db.remove_formats({book_id: {old_fmt.upper()}})
+                    repaired.append((book_id, old_fmt, kind))
+            except Exception as exc:
+                errors.append(f'{book_id}: {exc}')
+    if repaired:
+        gui.library_view.model().refresh()
+        gui.tags_view.recount()
+    return repaired, skipped, errors
+
 def import_books(gui, rows):
     from calibre.ebooks.metadata.meta import get_metadata
     from calibre.ebooks.metadata.book.base import Metadata

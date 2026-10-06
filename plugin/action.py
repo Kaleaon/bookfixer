@@ -17,6 +17,9 @@ class TakeoutAction(InterfaceAction):
             action = QAction(title, self.gui)
             action.triggered.connect(lambda checked=False, archive=archive: self.run_recovery(archive))
             menu.addAction(action)
+        repair = QAction('Repair selected books already in Calibre', self.gui)
+        repair.triggered.connect(self.repair_selected)
+        menu.addAction(repair)
         self.qaction.triggered.connect(lambda: self.run_recovery(False))
 
     def run_recovery(self, archive=False):
@@ -74,3 +77,29 @@ class TakeoutAction(InterfaceAction):
             error_dialog(self.gui, 'Takeout recovery failed', str(e), show=True)
         finally:
             progress.close()
+
+    def repair_selected(self):
+        ids = list(self.gui.library_view.get_selected_ids())
+        if not ids:
+            info_dialog(self.gui, 'Takeout book fixer', 'Select one or more books in Calibre first.', show=True)
+            return
+        dialog = QDialog(self.gui)
+        dialog.setWindowTitle('Repair selected Calibre books')
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('Corrected formats replace mislabeled formats in the selected books.'))
+        comics = QCheckBox('Convert text-free PDFs to CBZ comics')
+        layout.addWidget(comics)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            from calibre_plugins.takeout_book_fixer.importer import repair_library_books
+            repaired, skipped, errors = repair_library_books(self.gui, ids, comics.isChecked())
+            info_dialog(self.gui, 'Calibre repair complete',
+                        f'{len(repaired)} format(s) repaired; {len(skipped)} already correct; {len(errors)} errors.' +
+                        (f'\nErrors: {"; ".join(errors)}' if errors else ''), show=True)
+        except Exception as exc:
+            error_dialog(self.gui, 'Calibre repair failed', str(exc), show=True)

@@ -14,6 +14,8 @@ Build: `python build.py`. Test: `python -m unittest discover -s tests -v` (PDF t
 
 The importer reads embedded book metadata and covers using Calibre. Matching JSON sidecars (`book.pdf.json` or `book.json` beside `book.pdf`) supplement title, authors, publisher, description, language, categories, publication date and ISBN, including Google Books `volumeInfo` objects. Missing titles fall back to the original filename. Unsupported sidecar layouts are not guessed. No online metadata lookup is performed. Identical formats with the same title are skipped on subsequent imports. The JSON report includes import results and Calibre book IDs.
 
+The plugin menu also includes **Repair selected books already in Calibre**. Select books in the library, choose that command, and it checks every stored format by signature. A mislabeled EPUB is saved as EPUB and the old format is removed only after the corrected format is safely stored. The optional PDF-to-CBZ conversion is available here too. Metadata is refreshed from the corrected file when Calibre can read it. Books with unknown content are left unchanged.
+
 ## Real Takeout validation
 
 Version 1.0.1 was tested with the shared January 2025 export part 003: all 51 books recovered and imported into Calibre 9.15 with no errors. Content inspection identified 47 EPUBs and four PDFs; 16 of those EPUBs had been named `.pdf`. Calibre recovered known authors for 48 books and covers for all 51. Takeout ZIPs are streamed per member, allowing the archive itself to exceed the individual-book size limit. Other parts of the export and the full October 2026 export were not validated.
