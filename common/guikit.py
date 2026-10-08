@@ -44,6 +44,9 @@ def run_task(parent, title, func):
         progress.setLabelText(task.status or title)
         QApplication.processEvents()
         time.sleep(0.05)
+    # Qt emits `canceled` whenever this dialog closes, including our own close() below, which would make every finished
+    # task look cancelled. Only a Cancel pressed while the task ran should count, so silence the dialog before closing it.
+    progress.blockSignals(True)
     progress.close()
     return task
 
