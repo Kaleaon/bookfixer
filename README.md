@@ -21,3 +21,18 @@ The plugin menu also includes **Repair selected books already in Calibre**. Sele
 Version 1.0.1 was tested with the shared January 2025 export part 003: all 51 books recovered and imported into Calibre 9.15 with no errors. Content inspection identified 47 EPUBs and four PDFs; 16 of those EPUBs had been named `.pdf`. Calibre recovered known authors for 48 books and covers for all 51. Takeout ZIPs are streamed per member, allowing the archive itself to exceed the individual-book size limit. Other parts of the export and the full October 2026 export were not validated.
 
 Optional comic conversion was also verified with both real image-only PDFs (45 pages each): all pages rendered and both CBZs imported successfully. Both text-bearing PDFs stayed PDF. Lossless rendering took several minutes per comic in this environment.
+
+# Metabods Downloader for Calibre
+
+Separate plugin: `dist/MetabodsDownloader.zip` (build with `python build_metabods.py`). Install through **Preferences → Plugins → Load plugin from file** and restart; add **Metabods** to a toolbar via **Preferences → Toolbars & menus** if needed. Calibre 6 or newer.
+
+It builds EPUBs directly from the site's HTML print version (`story_print.php`, the page behind "Print / PDF") rather than converting the PDF, so text, italics and part structure come through cleanly and no PDF conversion step is needed.
+
+- **Download stories by link…**: paste story links, bare story ids, or list pages (author, tag, category, archive), one per line.
+- **Search by tag…**: browse the site's tag list with a filter box, check tags, choose *any* or *all* matching, then tick the stories you want. Click **★ Toggle favorite** on a highlighted tag to save it; favorites sort first, can be filtered with *Favorites only*, and **Check all favorites** selects them in one click. Favorites and the cached tag list live in Calibre's plugin settings (`Refresh tag list` re-reads the site).
+- **Multi-part stories**: all parts of a story are one download. They become chapters of a single EPUB, with a table of contents (Author's Note, Part 1, Part 2…). Tick **Combine everything into one book** to merge several separate stories (for example, a series of related titles or a tag search) into one omnibus EPUB with one nested contents entry per story.
+- Imported books get title, author, site tags and category as Calibre tags, the site summary as the comment, publisher *Metabods*, and a `metabods:<story id>` identifier. **Skip stories already in this library** uses that identifier, so repeat runs do not duplicate (combined books carry no identifier, so they are not detected as duplicates).
+
+Notes and limits: requests are throttled to about one per second and run in a background thread with a Cancel button; stories fetched before a cancel are still imported. Images, scripts and most inline styling in story text are dropped; basic formatting (italics, bold, line breaks, indents, centering) is kept. Stories are copyrighted by their authors and marked "not to be reposted without permission", so this is meant for personal reading copies. No cover image is added; use Calibre's *Generate cover*.
+
+Tested: parsing and EPUB construction against the live site (30 random stories plus a 50-part story, all well-formed EPUBs), the list/tag parsers, and 10 offline unit tests (`python -m unittest discover -s tests -p test_metabods.py -v`). **Not tested inside Calibre itself**: the dialogs, the Calibre library import and the menu were only import-checked against stubs, because Calibre was not available in the build environment. The Calibre calls used (`add_books`, `all_field_for`, `JSONConfig`) were checked against Calibre's source on GitHub.
