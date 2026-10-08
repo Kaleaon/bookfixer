@@ -7,7 +7,7 @@ from qt.core import (QAction, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
 from calibre_plugins.epub_promo_scrubber.core import Matcher, scrub_epub, scrub_files, tidy
 
 prefs = JSONConfig('plugins/epub_promo_scrubber')
-prefs.defaults.update(extra_patterns='', heuristic=True, drop_empty_pages=True, backup=True)
+prefs.defaults.update(extra_patterns='', heuristic=True, drop_empty_pages=True, backup=True, in_place=False)
 
 
 class ScrubAction(InterfaceAction):
@@ -41,9 +41,11 @@ class ScrubAction(InterfaceAction):
         heuristic.setChecked(prefs['heuristic'])
         drop = QCheckBox('Delete pages that contain nothing but promotion (and their contents entries)')
         drop.setChecked(prefs['drop_empty_pages'])
-        backup = QCheckBox('Keep the unmodified EPUB as ORIGINAL_EPUB when scrubbing library books')
+        backup = QCheckBox('Library books: keep the unmodified EPUB as ORIGINAL_EPUB (untick to replace the original with the cleaned version and discard any existing backup)')
         backup.setChecked(prefs['backup'])
-        for box in (heuristic, drop, backup):
+        in_place = QCheckBox('Files and folders: replace the original files with cleaned versions instead of writing copies to another folder')
+        in_place.setChecked(prefs['in_place'])
+        for box in (heuristic, drop, backup, in_place):
             layout.addWidget(box)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -54,6 +56,7 @@ class ScrubAction(InterfaceAction):
             prefs['heuristic'] = heuristic.isChecked()
             prefs['drop_empty_pages'] = drop.isChecked()
             prefs['backup'] = backup.isChecked()
+            prefs['in_place'] = in_place.isChecked()
 
     def scrub_selected(self):
         ids = list(self.gui.library_view.get_selected_ids())
@@ -73,6 +76,8 @@ class ScrubAction(InterfaceAction):
                 if new is not None:
                     if prefs['backup']:
                         db.save_original_format(book_id, 'EPUB')
+                    elif 'ORIGINAL_EPUB' in (db.formats(book_id) or ()):
+                        db.remove_formats({book_id: {'ORIGINAL_EPUB'}})
                     if not db.add_format(book_id, 'EPUB', BytesIO(new), replace=True):
                         raise ValueError('Calibre could not save the scrubbed EPUB')
                     changed.append(book_id)
@@ -106,14 +111,24 @@ class ScrubAction(InterfaceAction):
             source, _ = QFileDialog.getOpenFileName(self.gui, 'Select EPUB file', '', 'EPUB (*.epub)')
         if not source:
             return
-        output = QFileDialog.getExistingDirectory(self.gui, 'Select a separate folder for scrubbed copies')
-        if not output:
-            return
+        in_place = prefs['in_place']
+        output = None
+        if in_place:
+            sure = QMessageBox.question(self.gui, 'Replace original files?',
+                                        'Cleaned versions will overwrite the original EPUB files and the originals cannot be recovered. Continue?')
+            if sure != QMessageBox.StandardButton.Yes:
+                return
+        else:
+            output = QFileDialog.getExistingDirectory(self.gui, 'Select a separate folder for scrubbed copies')
+            if not output:
+                return
         try:
             extra, heuristic, drop = self.options()
-            rows, report_path = scrub_files(source, output, extra, heuristic, drop)
-            counts = {s: sum(r['status'] == s for r in rows) for s in ('scrubbed', 'unchanged', 'error')}
+            rows, report_path = scrub_files(source, output, extra, heuristic, drop, in_place)
+            done = 'replaced' if in_place else 'scrubbed'
+            counts = {s: sum(r['status'] == s for r in rows) for s in (done, 'unchanged', 'error')}
             info_dialog(self.gui, 'EPUB Promo Scrubber',
-                        f'{counts["scrubbed"]} scrubbed, {counts["unchanged"]} unchanged, {counts["error"]} errors.\nOriginals were not modified.\nReport: {report_path}', show=True)
+                        f'{counts[done]} {done}, {counts["unchanged"]} unchanged, {counts["error"]} errors.\n' +
+                        ('Original files were overwritten.' if in_place else 'Originals were not modified.') + f'\nReport: {report_path}', show=True)
         except Exception as exc:
             error_dialog(self.gui, 'EPUB Promo Scrubber failed', str(exc), show=True)

@@ -5,6 +5,7 @@ cannot be parsed as well-formed XML, including encrypted ones, are left byte-for
 """
 import io
 import json
+import os
 import posixpath
 import re
 import zipfile
@@ -364,9 +365,19 @@ def scrub_epub(data, extra_patterns=(), heuristic=True, drop_empty_pages=True):
         return out.getvalue(), report
 
 
-def scrub_files(source, output, extra_patterns=(), heuristic=True, drop_empty_pages=True):
-    """Scrub every .epub under source (file or folder) into output. Originals are never modified."""
-    source, output = Path(source), Path(output)
+def scrub_files(source, output=None, extra_patterns=(), heuristic=True, drop_empty_pages=True, in_place=False):
+    """Scrub every .epub under source (file or folder).
+
+    By default cleaned copies go to a separate output folder and originals are never modified.
+    With in_place=True each changed file is replaced by its cleaned version (written to a
+    temporary file first, then swapped in); unchanged files are not touched.
+    """
+    source = Path(source)
+    if in_place:
+        output = source if source.is_dir() else source.parent
+    elif output is None:
+        raise ValueError('An output folder is required unless replacing originals in place')
+    output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     paths = [source] if source.is_file() else sorted(source.rglob('*.epub'))
     rows = []
@@ -377,6 +388,11 @@ def scrub_files(source, output, extra_patterns=(), heuristic=True, drop_empty_pa
             row.update(report)
             if data is None:
                 row['status'] = 'unchanged'
+            elif in_place:
+                tmp = path.with_name(path.name + '.scrub-tmp')
+                tmp.write_bytes(data)
+                os.replace(tmp, path)
+                row.update(status='replaced', output=str(path))
             else:
                 target = output / path.name
                 if target.resolve() == path.resolve():

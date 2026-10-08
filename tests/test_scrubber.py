@@ -91,6 +91,20 @@ class ScrubTests(unittest.TestCase):
             self.assertTrue(report.exists())
             self.assertIn(b'OceanofPDF', (src / 'a.epub').read_bytes())
 
+    def test_in_place_replaces_original_only_when_changed(self):
+        with tempfile.TemporaryDirectory() as d:
+            clean = OPF.replace(' - OceanofPDF.com', '').replace('OceanofPDF.com', 'Some Press')
+            (Path(d) / 'dirty.epub').write_bytes(make('<p>Hi</p>'))
+            untouched = make('<p>Hi</p>', '<p>Cover</p>', clean)
+            (Path(d) / 'clean.epub').write_bytes(untouched)
+            rows, _ = core.scrub_files(d, in_place=True)
+            self.assertEqual({Path(r['input']).name: r['status'] for r in rows}, {'clean.epub': 'unchanged', 'dirty.epub': 'replaced'})
+            self.assertNotIn('oceanofpdf', read((Path(d) / 'dirty.epub').read_bytes(), 'OEBPS/content.opf').lower())
+            self.assertEqual((Path(d) / 'clean.epub').read_bytes(), untouched)
+            self.assertFalse(list(Path(d).glob('*.scrub-tmp')))
+            with self.assertRaises(ValueError):
+                core.scrub_files(d)
+
 
 if __name__ == '__main__':
     unittest.main()

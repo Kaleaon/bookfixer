@@ -2,8 +2,8 @@
 
 Install `dist/EpubPromoScrubber.zip` the same way (Preferences → Plugins → Load plugin from file), restart, and add **EPUB Promo Scrubber** to a toolbar if needed. It removes marks that sites add on top of a book: "Downloaded from …" banner pages and lines, hyperlinks to those sites, and site names in the book's metadata. Built-in names are OceanofPDF, PDFDrive, Z-Library, LibGen and Library Genesis. **Settings…** lets you add more site names, domains or `re:` regular expressions, and toggle the options below.
 
-- **Scrub selected books in Calibre** rewrites each selected book's EPUB and also cleans the library's title, publisher and comments fields. The unmodified EPUB is kept as ORIGINAL_EPUB unless you turn that off.
-- **Scrub EPUB file or folder** writes cleaned copies and a `scrub-report.json` to a separate folder; originals are untouched.
+- **Scrub selected books in Calibre** replaces each selected book's EPUB with the cleaned version and also cleans the library's title, publisher and comments fields. By default the unmodified EPUB is kept as ORIGINAL_EPUB. Untick that in **Settings…** to discard the original (and any existing ORIGINAL_EPUB) so only the cleaned version remains.
+- **Scrub EPUB file or folder** writes cleaned copies and a `scrub-report.json` to a separate folder; originals are untouched. Tick **replace the original files** in **Settings…** to overwrite the originals instead (after a confirmation prompt); only files that actually changed are rewritten, and the report is saved in the source folder.
 
 What it does inside the EPUB: deletes short blocks (250 characters or fewer) that name a blocked site; unwraps or removes links to it; trims leftover mentions in longer paragraphs; deletes pages that end up empty, along with their spine, contents and guide entries; cleans Dublin Core metadata and the ZIP comment. Optionally, short "Downloaded from <any website>" / "free ebooks" blocks from unlisted sites are removed too. Links to an author's or publisher's own site are kept. Every change is listed in the report.
 
