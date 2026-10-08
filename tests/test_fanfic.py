@@ -133,12 +133,16 @@ class PackagingTests(unittest.TestCase):
 
     def test_contents(self):
         for expected in ('__init__.py', 'engine.py', 'fanficfare/adapters/adapter_royalroadcom.py', 'fanficfare/defaults.ini',
-                         'cloudscraper/__init__.py', 'brotlidecpy/brotli-dict', 'THIRD_PARTY_LICENSES.txt',
+                         'cloudscraper/__init__.py', 'brotlidecpy/brotli-dict', 'flaresolverr.py', 'royalroad-flaresolverr.md', 'THIRD_PARTY_LICENSES.txt',
                          'plugin-import-name-fanfic_downloader.txt'):
             self.assertIn(expected, self.names)
         for excluded in ('fanficfare/cli.py', 'fanficfare/writers/writer_txt.py', 'fanficfare/writers/writer_mobi.py'):
             self.assertNotIn(excluded, self.names)
         self.assertFalse([n for n in self.names if '__pycache__' in n or n.endswith('.pyc')])
+
+    def test_bundled_guide_is_the_docs_file(self):
+        self.assertEqual(self.zip.read('royalroad-flaresolverr.md').decode('utf-8'),
+                         (ROOT / 'docs' / 'royalroad-flaresolverr.md').read_text(encoding='utf-8'))
 
     def test_no_absolute_fanficfare_imports_remain(self):
         for name in self.names:

@@ -49,13 +49,15 @@ curl -L -X POST 'http://localhost:8191/v1' \
   --data-raw '{"cmd": "request.get", "url": "https://www.royalroad.com/fiction/21220", "maxTimeout": 60000}'
 ```
 
-A working setup returns JSON containing `"status": "ok"` and, inside `solution`, a `status` of 200 and the page HTML. If it
+(The **Test** buttons in this window do the same checks for you.) A working setup returns JSON containing `"status": "ok"` and, inside `solution`, a `status` of 200 and the page HTML. If it
 returns an error, fix that first (see Troubleshooting); the plugin will fail in the same way. Start it with
 `-e LOG_LEVEL=debug` to see more.
 
 ## 3. Tell the plugin to use it
 
-Open **Fanfic sites** in Calibre and paste this into **Advanced settings**:
+In the plugin's download window, the **Enable for Royal Road** button (in this guide's window) adds the lines below to
+**Advanced settings** for you, without touching anything else already there. To do it by hand instead, paste this into
+**Advanced settings**:
 
 ```ini
 [www.royalroad.com]

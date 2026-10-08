@@ -114,6 +114,7 @@ def add_vendored(z):
         if path.name == 'LICENSE':
             continue
         z.write(path, f'brotlidecpy/{path.name}')
+    z.write(root / 'docs' / 'royalroad-flaresolverr.md', 'royalroad-flaresolverr.md')  # shown by the plugin's setup dialog
     z.writestr('THIRD_PARTY_LICENSES.txt', _licenses() + '\n===== brotlidecpy 1.0.3 (pure-Python Brotli decoder) =====\n'
                + (bro / 'LICENSE').read_text(encoding='utf-8') + '\nSource: https://github.com/sidney/brotlidecpy\n')
 
