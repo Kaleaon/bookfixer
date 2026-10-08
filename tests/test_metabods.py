@@ -1,10 +1,12 @@
 import importlib.util
 import io
 from pathlib import Path
+import sys
 import unittest
 import xml.dom.minidom
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
 spec = importlib.util.spec_from_file_location('mcore', Path(__file__).resolve().parents[1] / 'metabods/core.py')
 core = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(core)

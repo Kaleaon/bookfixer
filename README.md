@@ -22,17 +22,51 @@ Version 1.0.1 was tested with the shared January 2025 export part 003: all 51 bo
 
 Optional comic conversion was also verified with both real image-only PDFs (45 pages each): all pages rendered and both CBZs imported successfully. Both text-bearing PDFs stayed PDF. Lossless rendering took several minutes per comic in this environment.
 
-# Metabods Downloader for Calibre
+# Story downloaders and tagger for Calibre
 
-Separate plugin: `dist/MetabodsDownloader.zip` (build with `python build_metabods.py`). Install through **Preferences → Plugins → Load plugin from file** and restart; add **Metabods** to a toolbar via **Preferences → Toolbars & menus** if needed. Calibre 6 or newer.
+Three more plugins live beside the Takeout fixer. Build all zips with `python build_plugins.py` (output in `dist/`); install each through **Preferences → Plugins → Load plugin from file**, restart Calibre, and add its button via **Preferences → Toolbars & menus** if needed. Calibre 6 or newer. Shared code (`common/`: fetching, text cleaning, EPUB building, library import) is bundled into each downloader's zip.
+
+| Plugin | Zip | Purpose |
+| --- | --- | --- |
+| Metabods Downloader | `MetabodsDownloader.zip` | Metabods stories → EPUB, tag search, favorites |
+| Nifty Downloader | `NiftyDownloader.zip` | Nifty archive stories → EPUB, category browser |
+| Story Collection Tagger | `StoryCollectionTagger.zip` | Tag books by source site and your own keyword rules |
+
+Stories are copyrighted by their authors and both sites ask that they not be reposted, so these are for personal reading copies. Requests are throttled to about one per second and run in a background thread with a Cancel button; whatever was fetched before a cancel is still imported. No cover is added (use Calibre's *Generate cover*).
+
+## Metabods Downloader
 
 It builds EPUBs directly from the site's HTML print version (`story_print.php`, the page behind "Print / PDF") rather than converting the PDF, so text, italics and part structure come through cleanly and no PDF conversion step is needed.
 
 - **Download stories by link…**: paste story links, bare story ids, or list pages (author, tag, category, archive), one per line.
-- **Search by tag…**: browse the site's tag list with a filter box, check tags, choose *any* or *all* matching, then tick the stories you want. Click **★ Toggle favorite** on a highlighted tag to save it; favorites sort first, can be filtered with *Favorites only*, and **Check all favorites** selects them in one click. Favorites and the cached tag list live in Calibre's plugin settings (`Refresh tag list` re-reads the site).
-- **Multi-part stories**: all parts of a story are one download. They become chapters of a single EPUB, with a table of contents (Author's Note, Part 1, Part 2…). Tick **Combine everything into one book** to merge several separate stories (for example, a series of related titles or a tag search) into one omnibus EPUB with one nested contents entry per story.
-- Imported books get title, author, site tags and category as Calibre tags, the site summary as the comment, publisher *Metabods*, and a `metabods:<story id>` identifier. **Skip stories already in this library** uses that identifier, so repeat runs do not duplicate (combined books carry no identifier, so they are not detected as duplicates).
+- **Search by tag…**: browse the site's tag list with a filter box, check tags, choose *any* or *all* matching, then tick the stories you want. **★ Toggle favorite** saves a highlighted tag; favorites sort first, can be filtered with *Favorites only*, and **Check all favorites** selects them in one click. Favorites and the cached tag list live in Calibre's plugin settings (*Refresh tag list* re-reads the site).
+- **Multi-part stories**: all parts of a story are one download and become chapters of a single EPUB with a table of contents. **Combine everything into one book** merges several separate stories into one omnibus EPUB with one nested contents entry per story.
+- Imported books get title, author, site tags and category as Calibre tags, the site summary as the comment, publisher *Metabods*, and a `metabods:<story id>` identifier, which **Skip stories already in this library** uses to avoid duplicates. Combined books carry no identifier.
+- Images, scripts and most inline styling are dropped; italics, bold, line breaks, indents and centering are kept.
 
-Notes and limits: requests are throttled to about one per second and run in a background thread with a Cancel button; stories fetched before a cancel are still imported. Images, scripts and most inline styling in story text are dropped; basic formatting (italics, bold, line breaks, indents, centering) is kept. Stories are copyrighted by their authors and marked "not to be reposted without permission", so this is meant for personal reading copies. No cover image is added; use Calibre's *Generate cover*.
+## Nifty Downloader
 
-Tested: parsing and EPUB construction against the live site (30 random stories plus a 50-part story, all well-formed EPUBs), the list/tag parsers, and 10 offline unit tests (`python -m unittest discover -s tests -p test_metabods.py -v`). **Not tested inside Calibre itself**: the dialogs, the Calibre library import and the menu were only import-checked against stubs, because Calibre was not available in the build environment. The Calibre calls used (`add_books`, `all_field_for`, `JSONConfig`) were checked against Calibre's source on GitHub.
+Nifty is a plain directory tree (section / category / story or series folder) of mail-style text files, one per chapter, with no tags or summaries.
+
+- **Download stories by address…**: paste a story file, a series folder, or a category folder. A link to any chapter downloads the whole series. A bare section (for example `/nifty/gay/`) is refused as too broad.
+- **Browse by category…**: pick a section (gay, lesbian, bisexual, transgender) and a category, load its entries, filter by title, and tick what you want. **★ Toggle favorite** saves a category, and a *Favorite categories* drop-down jumps straight to one.
+- **Chapters are joined into one book**: files named `name-1`, `name-2`, … (also `chapter05`) are grouped and ordered numerically into one EPUB with a contents entry per chapter. One folder can hold several series; each becomes its own book. The combine option works here too.
+- The hard-wrapped text is re-flowed into paragraphs; blocks that look like verse or lists keep their line breaks; `____`, `***` and `---` scene breaks become rules. A few old stories are HTML pages and are cleaned like Metabods text.
+- Metadata comes from the mail headers: the title is the Subject with chapter markers and category lists removed, the author is the From name (the email address is dropped), the date becomes the publication date, and the section and category become tags. Publisher is *Nifty*; identifier is `nifty:<path>`.
+- **Limits**: old files with no headers get the author *Unknown* and a title taken from the folder or file name. Odd or truncated Subject lines may leave an imperfect title. Nothing is added that the archive does not publish.
+
+## Story Collection Tagger
+
+Adds tags so books from different sites can be organized together. Run **Auto-tag stories** on the selected books or the whole library; **Preview** shows exactly which books would get which tags, and nothing changes until **Apply**. It only adds tags, never removes or renames existing ones, and running it again adds nothing new.
+
+- **Source tag**: each book is matched to a site by an identifier name (`metabods`, `nifty`, `royalroad`, `ao3`, ...), or by the site's address appearing in any identifier value or the publisher. Built in: Metabods, Nifty, Royal Road, Archive of Our Own, FanFiction.Net, Wattpad, Scribble Hub, Literotica, Sufficient Velocity, SpaceBattles, Webnovel, Wuxiaworld, SoFurry, Fur Affinity, Tapas. Add more as `host => Name` lines. A matching book gets, for example, `Source.Royal Road`; the prefix is editable. To see them as a nested tree, enable hierarchical display for tags in Calibre's *Look & feel → Tag browser* settings. Descriptions are only searched for addresses if you tick the option, since they can over-match.
+- **Keyword rules**: lines of `[field:]pattern => Tag, Tag` map what is already on a book to your own cross-site tags. Fields: `tags`, `title`, `author`, `series`, `comments`, `publisher`, `source`, `any`; the default looks at title, tags and series. A plain pattern is a case-insensitive substring, `=text` must match exactly, and `re:...` is a regular expression. For example `tags:=Muscle Growth => Theme.Growth` gives Metabods and other sites' books a shared tag, and `source:Royal Road => Format.Web serial` tags by site.
+- **Series tag**: optionally tag every book in a series (`Series.<name>`).
+- Royal Road is recognised for tagging only: there is no Royal Road downloader here. Books you add another way are tagged if they carry the site's address or identifier; I did not verify which identifier names other downloaders write, so use the extra-sites box if one is missed.
+
+## Testing
+
+Run `python -m unittest discover -s tests -p "test_*.py" -v`. Offline tests cover the Metabods and Nifty parsers, text cleaning, EPUB structure, the tagger, and an import check of each built zip under stubbed Calibre and Qt modules. The one failing test in a plain environment is the older PDF test, which needs PyMuPDF.
+
+Against the live sites: 30 random Metabods stories plus a 50-part one, and 26 Nifty books across all four sections (including a 58-chapter series, `.html` chapter files and odd subjects) all produced well-formed EPUBs. **Not tested inside Calibre itself** (it was not available here): the dialogs, menus, library import, tag application and refresh. The Calibre calls used (`add_books`, `all_field_for`, `get_metadata`, `set_field`, `refresh_ids`, `JSONConfig`) were checked against Calibre's source on GitHub, and the modules were import-checked against stubs.
+

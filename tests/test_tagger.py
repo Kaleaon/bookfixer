@@ -1,0 +1,69 @@
+import importlib.util
+from pathlib import Path
+import unittest
+
+spec = importlib.util.spec_from_file_location('rules', Path(__file__).resolve().parents[1] / 'tagger/rules.py')
+rules = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rules)
+
+
+def book(i, **kw):
+    base = {'id': i, 'title': f'Book {i}', 'authors': ['A'], 'tags': [], 'identifiers': {}, 'publisher': '', 'comments': '', 'series': ''}
+    base.update(kw)
+    return base
+
+
+class DetectTests(unittest.TestCase):
+    def test_identifier_key_value_and_publisher(self):
+        s = rules.DEFAULT_SITES
+        self.assertEqual(rules.detect_sites(book(1, identifiers={'metabods': 'x'}), s), ['Metabods'])
+        self.assertEqual(rules.detect_sites(book(1, identifiers={'url': 'https://www.royalroad.com/fiction/1/x'}), s), ['Royal Road'])
+        self.assertEqual(rules.detect_sites(book(1, publisher='archiveofourown.org'), s), ['Archive of Our Own'])
+        self.assertEqual(rules.detect_sites(book(1, identifiers={'isbn': '123'}), s), [])
+
+    def test_host_must_be_whole_word_and_comments_opt_in(self):
+        s = rules.DEFAULT_SITES
+        self.assertEqual(rules.detect_sites(book(1, identifiers={'url': 'https://notnifty.org.evil.com/'}), s), [])
+        text = book(1, comments='<p>originally on royalroad.com</p>')
+        self.assertEqual(rules.detect_sites(text, s), [])
+        self.assertEqual(rules.detect_sites(text, s, scan_comments=True), ['Royal Road'])
+
+
+class ParseTests(unittest.TestCase):
+    def test_rules_and_errors(self):
+        parsed, errors = rules.parse_rules('# c\ntag:=Cock Growth => Theme.Growth, Growth\nlitrpg => LitRPG\nre:(( => Bad\nnonsense\ntitle: => x\n')
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0].tags, ['Theme.Growth', 'Growth'])
+        self.assertEqual(len(errors), 3)
+
+    def test_sites(self):
+        sites, errors = rules.parse_sites('storiesonline.net, sol.net => Stories Online\nbroken')
+        self.assertEqual(sites, [('Stories Online', ['storiesonline.net', 'sol.net'], [])])
+        self.assertEqual(len(errors), 1)
+
+
+class PlanTests(unittest.TestCase):
+    def test_source_tags_additive_and_case_insensitive(self):
+        books = [book(1, identifiers={'nifty': 'a'}, tags=['source.nifty', 'Keep']), book(2, identifiers={'metabods': 'b'}, tags=['X']),
+                 book(3)]
+        plan = rules.plan_changes(books)
+        self.assertEqual([p['id'] for p in plan], [2])  # book 1 already has the tag (any case); book 3 has no source
+        self.assertEqual(plan[0]['tags'], ['X', 'Source.Metabods'])
+
+    def test_rules_fields_and_series(self):
+        parsed, _ = rules.parse_rules('tag:=Muscle Growth => Theme.Growth\nsource:Royal => Web serial\ntitle:re:^The\\b => Starts with The\nlitrpg => LitRPG')
+        books = [book(1, tags=['Muscle Growth', 'Other'], title='The End', series='Saga', identifiers={'royalroad': '1'}),
+                 book(2, tags=['Muscle Growth Extra'], title='Zed')]
+        plan = {p['id']: p['add'] for p in rules.plan_changes(books, series_prefix='Series.', rules=parsed)}
+        self.assertEqual(plan[1], ['Source.Royal Road', 'Series.Saga', 'Theme.Growth', 'Web serial', 'Starts with The'])
+        self.assertNotIn(2, plan)  # '=' means exact tag match, so "Muscle Growth Extra" does not trigger
+
+    def test_idempotent(self):
+        b = book(1, identifiers={'nifty': 'a'})
+        first = rules.plan_changes([b])
+        b['tags'] = first[0]['tags']
+        self.assertEqual(rules.plan_changes([b]), [])
+
+
+if __name__ == '__main__':
+    unittest.main()

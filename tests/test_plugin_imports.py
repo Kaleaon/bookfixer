@@ -1,0 +1,82 @@
+"""Loads each built plugin zip against stub calibre/Qt modules to catch import and name errors.
+
+This does not exercise real Calibre or Qt behaviour; it only proves the packaged modules import and their pure helpers run.
+"""
+import importlib
+from pathlib import Path
+import sys
+import tempfile
+import types
+import unittest
+from unittest.mock import MagicMock
+import zipfile
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+import build_plugins  # noqa: E402
+
+STUBS = ['calibre', 'calibre.customize', 'calibre.gui2', 'calibre.gui2.actions', 'calibre.utils', 'calibre.utils.config',
+         'calibre.utils.date', 'calibre.ebooks', 'calibre.ebooks.metadata', 'calibre.ebooks.metadata.book',
+         'calibre.ebooks.metadata.book.base', 'qt', 'qt.core']
+
+
+class Meta:
+    def __init__(self, title, authors):
+        self.title, self.authors, self.ids = title, authors, {}
+
+    def set_identifier(self, key, value):
+        self.ids[key] = value
+
+
+class PluginImportTests(unittest.TestCase):
+    def setUp(self):
+        self.saved = {k: v for k, v in sys.modules.items() if k.startswith(('calibre', 'qt', 'calibre_plugins'))}
+        for name in STUBS:
+            sys.modules[name] = MagicMock()
+        sys.modules['calibre.ebooks.metadata.book.base'].Metadata = Meta
+        sys.modules['calibre.gui2.actions'].InterfaceAction = object
+        sys.modules['calibre.customize'].InterfaceActionBase = object
+        sys.modules['calibre.utils.config'].JSONConfig = lambda name: type('Prefs', (dict,), {'defaults': {}})()
+        self.tmp = tempfile.TemporaryDirectory()
+        sys.modules['calibre_plugins'] = types.ModuleType('calibre_plugins')
+        sys.modules['calibre_plugins'].__path__ = []
+
+    def tearDown(self):
+        for k in [k for k in sys.modules if k.startswith(('calibre', 'qt'))]:
+            del sys.modules[k]
+        sys.modules.update(self.saved)
+        self.tmp.cleanup()
+
+    def load(self, import_name):
+        """Extract the freshly built zip and register it as calibre_plugins.<import_name>."""
+        if not hasattr(self, 'built'):
+            self.built = build_plugins.build_all(Path(self.tmp.name) / 'dist')
+        target = Path(self.tmp.name) / import_name
+        zipfile.ZipFile(self.built[import_name]).extractall(target)
+        package = f'calibre_plugins.{import_name}'
+        module = types.ModuleType(package)
+        module.__path__ = [str(target)]
+        sys.modules[package] = module
+        return package
+
+    def test_every_plugin_module_imports(self):
+        for import_name in build_plugins.PLUGINS_BY_IMPORT:
+            package = self.load(import_name)
+            modules = ['config', 'action', 'rules'] if import_name == 'story_collection_tagger' else ['config', 'action', 'ui', 'core']
+            for module in modules:
+                with self.subTest(plugin=import_name, module=module):
+                    importlib.import_module(f'{package}.{module}')
+
+    def test_library_metadata_helper(self):
+        package = self.load('metabods_downloader')
+        libkit = importlib.import_module(package + '.libkit')
+        group = [{'id': 'a', 'title': 'T', 'author': 'Au', 'tags': ['x'], 'categories': ['c'], 'summary': 'S & s', 'pubdate': '2026-01-02'}]
+        mi = libkit.metadata_for(group, None, 'metabods', 'Metabods')
+        self.assertEqual((mi.title, mi.authors, mi.ids, mi.tags), ('T', ['Au'], {'metabods': 'a'}, ['x', 'c']))
+        self.assertEqual(mi.comments, '<p>S &amp; s</p>')
+        two = libkit.metadata_for(group + [dict(group[0], id='b', title='U')], 'Omni', 'metabods', 'Metabods')
+        self.assertEqual((two.title, two.ids), ('Omni', {}))
+
+
+if __name__ == '__main__':
+    unittest.main()

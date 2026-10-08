@@ -1,11 +1,11 @@
-from io import BytesIO
-
 from calibre.gui2 import error_dialog, info_dialog, question_dialog
 from calibre.gui2.actions import InterfaceAction
 from qt.core import QAction, QMenu
 
 from calibre_plugins.metabods_downloader import core
-from calibre_plugins.metabods_downloader.ui import DownloadDialog, TagSearchDialog, run_task
+from calibre_plugins.metabods_downloader import libkit
+from calibre_plugins.metabods_downloader.guikit import run_task
+from calibre_plugins.metabods_downloader.ui import DownloadDialog, TagSearchDialog
 
 IDENTIFIER = 'metabods'
 
@@ -25,9 +25,7 @@ class MetabodsAction(InterfaceAction):
 
     # -- library helpers
     def existing_ids(self):
-        db = self.gui.current_db.new_api
-        found = db.all_field_for('identifiers', db.all_book_ids(), {})
-        return {idents[IDENTIFIER] for idents in found.values() if idents and IDENTIFIER in idents}
+        return libkit.existing_ids(self.gui, IDENTIFIER)
 
     # -- entry points
     def download_by_link(self):
@@ -87,7 +85,7 @@ class MetabodsAction(InterfaceAction):
         task = run_task(self.gui, 'Downloading stories…', work)  # on cancel, stories fetched so far are still imported
         if task.error:
             failures.append(str(task.error))
-        imported, build_errors = self.import_stories(stories, combine, title)
+        imported, build_errors = libkit.import_stories(self.gui, stories, combine, title, core.build_epub, IDENTIFIER, core.PUBLISHER)
         failures.extend(build_errors)
         lines = [f'{imported} book(s) added.']
         if skipped:
@@ -96,39 +94,3 @@ class MetabodsAction(InterfaceAction):
             lines.append('Cancelled; stories downloaded before that were kept.')
         lines += problems + failures
         info_dialog(self.gui, 'Metabods download complete', '\n'.join(lines), show=True)
-
-    def import_stories(self, stories, combine, title):
-        if not stories:
-            return 0, []
-        db = self.gui.current_db.new_api
-        groups = [stories] if combine else [[s] for s in stories]
-        added, errors = 0, []
-        for group in groups:
-            try:
-                data = core.build_epub(group, title=(title or None) if combine else None)
-                ids, _ = db.add_books([(self.metadata_for(group, title if combine else None), {'EPUB': BytesIO(data)})])
-                added += len(ids)
-            except Exception as exc:
-                errors.append(f"{', '.join(s['id'] for s in group)}: {exc}")
-        if added:
-            self.gui.library_view.model().refresh()
-            self.gui.tags_view.recount()
-        return added, errors
-
-    @staticmethod
-    def metadata_for(group, title=None):
-        from calibre.ebooks.metadata.book.base import Metadata
-        from html import escape
-        combined = len(group) > 1
-        authors = list(dict.fromkeys(s['author'] for s in group))
-        mi = Metadata(title or (group[0]['title'] if not combined else f"{group[0]['title']} and {len(group) - 1} more"), authors)
-        mi.publisher = 'Metabods'
-        mi.languages = ['eng']
-        mi.tags = list(dict.fromkeys(t for s in group for t in s.get('tags', []) + s.get('categories', [])))
-        if combined:
-            mi.comments = '<ol>' + ''.join(f"<li>{escape(s['title'])} — {escape(s['author'])}</li>" for s in group) + '</ol>'
-        else:
-            if group[0].get('summary'):
-                mi.comments = f"<p>{escape(group[0]['summary'])}</p>"
-            mi.set_identifier(IDENTIFIER, group[0]['id'])
-        return mi

@@ -1,53 +1,10 @@
-"""Dialogs and a small background-task helper. Network work never runs on the GUI thread."""
-import threading
-import time
-
+"""Metabods dialogs. Network work never runs on the GUI thread (see guikit.run_task)."""
 from qt.core import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit,
                      QListWidget, QListWidgetItem, QPlainTextEdit, QProgressDialog, QPushButton, Qt, QVBoxLayout, QWidget)
 
 from calibre_plugins.metabods_downloader.config import prefs
 from calibre_plugins.metabods_downloader import core
-
-
-class Task:
-    """Runs func(task) in a thread; func polls task.cancelled() and may set task.status."""
-
-    def __init__(self, func):
-        self.func = func
-        self.status = ''
-        self.result = None
-        self.error = None
-        self._cancel = threading.Event()
-
-    def cancelled(self):
-        return self._cancel.is_set()
-
-    def _run(self):
-        try:
-            self.result = self.func(self)
-        except core.Cancelled:
-            pass
-        except Exception as exc:  # reported to the user by the caller
-            self.error = exc
-
-
-def run_task(parent, title, func):
-    """Returns the finished Task; check task.error and task.cancelled()."""
-    task = Task(func)
-    thread = threading.Thread(target=task._run, daemon=True)
-    progress = QProgressDialog(title, 'Cancel', 0, 0, parent)
-    progress.setWindowTitle(title)
-    progress.setWindowModality(Qt.WindowModality.WindowModal)
-    progress.setMinimumDuration(0)
-    progress.canceled.connect(task._cancel.set)
-    progress.show()
-    thread.start()
-    while thread.is_alive():
-        progress.setLabelText(task.status or title)
-        QApplication.processEvents()
-        time.sleep(0.05)
-    progress.close()
-    return task
+from calibre_plugins.metabods_downloader.guikit import DownloadOptions, run_task
 
 
 class DownloadDialog(QDialog):
@@ -62,7 +19,7 @@ class DownloadDialog(QDialog):
         self.text = QPlainTextEdit()
         self.text.setPlaceholderText('https://metabods.com/mbxy/site/story.php?id=bennet-3120\nhttps://metabods.com/mbxy/site/archive.php?list=author&id=368')
         layout.addWidget(self.text)
-        self.options = DownloadOptions(self)
+        self.options = DownloadOptions(self, prefs)
         layout.addWidget(self.options)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -71,29 +28,6 @@ class DownloadDialog(QDialog):
 
     def lines(self):
         return [line for line in self.text.toPlainText().splitlines() if line.strip()]
-
-
-class DownloadOptions(QWidget):
-    """Option checkboxes shared by both dialogs (embedded as a plain widget)."""
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self.skip = QCheckBox('Skip stories already in this library')
-        self.skip.setChecked(bool(prefs['skip_existing']))
-        layout.addWidget(self.skip)
-        self.combine = QCheckBox('Combine everything into one book (otherwise each story is its own book, with its parts as chapters)')
-        layout.addWidget(self.combine)
-        self.title = QLineEdit()
-        self.title.setPlaceholderText('Title for the combined book')
-        self.title.setEnabled(False)
-        self.combine.toggled.connect(self.title.setEnabled)
-        layout.addWidget(self.title)
-
-    def values(self):
-        prefs['skip_existing'] = self.skip.isChecked()
-        return self.skip.isChecked(), self.combine.isChecked(), self.title.text().strip()
 
 
 class TagSearchDialog(QDialog):
@@ -158,7 +92,7 @@ class TagSearchDialog(QDialog):
         row.addStretch(1)
         layout.addLayout(row)
 
-        self.options = DownloadOptions(self)
+        self.options = DownloadOptions(self, prefs)
         layout.addWidget(self.options)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Download checked stories')

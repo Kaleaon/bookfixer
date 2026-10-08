@@ -1,0 +1,150 @@
+"""Source detection and keyword rules for tagging books. Pure standard library so it can be tested outside Calibre.
+
+Everything here is additive: the plan only ever adds tags, never removes or renames existing ones.
+"""
+import re
+
+# (display name, hosts, identifier keys that mean "this came from there")
+DEFAULT_SITES = [
+    ('Metabods', ['metabods.com'], ['metabods']),
+    ('Nifty', ['nifty.org', 'niftyarchives.org'], ['nifty']),
+    ('Royal Road', ['royalroad.com', 'royalroadl.com'], ['royalroad', 'royalroadl']),
+    ('Archive of Our Own', ['archiveofourown.org', 'ao3.org'], ['ao3']),
+    ('FanFiction.Net', ['fanfiction.net'], ['ffnet', 'fanfictionnet']),
+    ('Wattpad', ['wattpad.com'], []),
+    ('Scribble Hub', ['scribblehub.com'], []),
+    ('Literotica', ['literotica.com'], []),
+    ('Sufficient Velocity', ['sufficientvelocity.com'], []),
+    ('SpaceBattles', ['spacebattles.com'], []),
+    ('Webnovel', ['webnovel.com'], []),
+    ('Wuxiaworld', ['wuxiaworld.com'], []),
+    ('SoFurry', ['sofurry.com'], []),
+    ('Fur Affinity', ['furaffinity.net'], []),
+    ('Tapas', ['tapas.io'], []),
+]
+
+FIELDS = {'tag': 'tags', 'tags': 'tags', 'title': 'title', 'author': 'authors', 'authors': 'authors', 'series': 'series',
+          'comments': 'comments', 'publisher': 'publisher', 'source': 'source', 'any': 'any'}
+DEFAULT_FIELDS = ('title', 'tags', 'series')
+
+
+class Rule:
+    def __init__(self, field, pattern, tags):
+        self.field, self.pattern, self.tags = field, pattern, tags
+        if pattern.startswith('re:'):
+            self.match = re.compile(pattern[3:], re.I).search
+        elif pattern.startswith('='):
+            exact = pattern[1:].strip().casefold()
+            self.match = lambda text: text.casefold() == exact
+        else:
+            needle = pattern.strip().casefold()
+            self.match = lambda text: needle in text.casefold()
+
+
+def parse_sites(text):
+    """Extra sites, one per line: 'host[, host2] => Name'. Returns (sites, errors)."""
+    sites, errors = [], []
+    for n, line in enumerate((text or '').splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if '=>' not in line:
+            errors.append(f'Site line {n}: expected "host => Name"')
+            continue
+        hosts, name = (x.strip() for x in line.split('=>', 1))
+        hosts = [h.strip().lower() for h in hosts.split(',') if h.strip()]
+        if not hosts or not name:
+            errors.append(f'Site line {n}: expected "host => Name"')
+            continue
+        sites.append((name, hosts, []))
+    return sites, errors
+
+
+def parse_rules(text):
+    """Rules, one per line: '[field:]pattern => Tag A, Tag B'. Returns (rules, errors)."""
+    rules, errors = [], []
+    for n, line in enumerate((text or '').splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if '=>' not in line:
+            errors.append(f'Rule line {n}: expected "pattern => tag"')
+            continue
+        left, right = (x.strip() for x in line.split('=>', 1))
+        field = None
+        m = re.match(r'^([A-Za-z]+):(.*)$', left)
+        if m and m.group(1).lower() in FIELDS:
+            field, left = FIELDS[m.group(1).lower()], m.group(2).strip()
+        tags = [t.strip() for t in right.split(',') if t.strip()]
+        if not left or not tags:
+            errors.append(f'Rule line {n}: expected "pattern => tag"')
+            continue
+        try:
+            rules.append(Rule(field, left, tags))
+        except re.error as exc:
+            errors.append(f'Rule line {n}: bad regular expression ({exc})')
+    return rules, errors
+
+
+def _host_pattern(host):
+    return re.compile(r'(?<![\w-])' + re.escape(host) + r'(?![\w-])', re.I)
+
+
+def detect_sites(book, sites, scan_comments=False):
+    """Names of the sites a book appears to come from, in table order."""
+    idents = {str(k).lower(): str(v) for k, v in (book.get('identifiers') or {}).items()}
+    haystacks = list(idents.values()) + [book.get('publisher') or '']
+    if scan_comments:
+        haystacks.append(book.get('comments') or '')
+    found = []
+    for name, hosts, keys in sites:
+        if any(k.lower() in idents for k in keys) or any(
+                _host_pattern(h).search(text) for h in hosts for text in haystacks if text):
+            found.append(name)
+    return found
+
+
+def _values(book, field):
+    value = book.get(field)
+    if value is None:
+        return []
+    return [str(v) for v in value] if isinstance(value, (list, tuple)) else [str(value)]
+
+
+def rule_hits(book, rule, sources):
+    field = rule.field
+    if field == 'source':
+        texts = list(sources)
+    elif field in (None, 'any'):
+        texts = [t for f in DEFAULT_FIELDS for t in _values(book, f)]
+        if field == 'any':
+            texts += _values(book, 'authors') + _values(book, 'comments') + _values(book, 'publisher')
+    else:
+        texts = _values(book, field)
+    return any(rule.match(t) for t in texts)
+
+
+def plan_changes(books, source_prefix='Source.', add_source=True, series_prefix='', rules=(), sites=DEFAULT_SITES,
+                 scan_comments=False):
+    """Tags to add per book. Returns [{'id', 'title', 'add': [...], 'tags': [...final tags...]}] for books that change."""
+    plan = []
+    for book in books:
+        have = list(book.get('tags') or [])
+        known = {t.casefold() for t in have}
+        sources = detect_sites(book, sites, scan_comments)
+        wanted = []
+        if add_source:
+            wanted += [f'{source_prefix}{s}' for s in sources]
+        if series_prefix and book.get('series'):
+            wanted.append(f"{series_prefix}{book['series']}")
+        for rule in rules:
+            if rule_hits(book, rule, sources):
+                wanted += rule.tags
+        add = []
+        for tag in wanted:
+            if tag.casefold() not in known:
+                known.add(tag.casefold())
+                add.append(tag)
+        if add:
+            plan.append({'id': book['id'], 'title': book.get('title', ''), 'add': add, 'tags': have + add})
+    return plan
