@@ -1,0 +1,88 @@
+from calibre.gui2 import error_dialog, info_dialog, question_dialog
+from calibre.gui2.actions import InterfaceAction
+from qt.core import QAction, QMenu
+
+from calibre_plugins.nifty_downloader import core
+from calibre_plugins.nifty_downloader import libkit
+from calibre_plugins.nifty_downloader.guikit import run_task
+from calibre_plugins.nifty_downloader.ui import BrowseDialog, LinksDialog
+
+IDENTIFIER = 'nifty'
+
+
+class NiftyAction(InterfaceAction):
+    name = 'Nifty Downloader'
+    action_spec = ('Nifty', None, 'Download Nifty archive stories as EPUB', None)
+
+    def genesis(self):
+        menu = QMenu(self.gui)
+        self.qaction.setMenu(menu)
+        for title, slot in [('Download stories by address…', self.download_by_link), ('Browse by category…', self.browse)]:
+            action = QAction(title, self.gui)
+            action.triggered.connect(slot)
+            menu.addAction(action)
+        self.qaction.triggered.connect(self.browse)
+
+    def existing_ids(self):
+        return libkit.existing_ids(self.gui, IDENTIFIER)
+
+    def download_by_link(self):
+        dialog = LinksDialog(self.gui)
+        if dialog.exec() != dialog.DialogCode.Accepted or not dialog.lines():
+            return
+        skip, combine, title = dialog.options.values()
+        lines = dialog.lines()
+
+        def expand(task):
+            return core.expand_targets(core.Fetcher(cancelled=task.cancelled), lines, lambda msg: setattr(task, 'status', msg))
+
+        task = run_task(self.gui, 'Reading addresses…', expand)
+        if task.error:
+            return error_dialog(self.gui, 'Nifty', f'Could not read the addresses: {task.error}', show=True)
+        if task.result is None:
+            return
+        refs, problems = task.result
+        self.download(refs, skip, combine, title, problems)
+
+    def browse(self):
+        dialog = BrowseDialog(self.gui, self.existing_ids())
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        skip, combine, title = dialog.options.values()
+        self.download(dialog.selected_refs(), skip, combine, title, [])
+
+    def download(self, refs, skip, combine, title, problems):
+        if not refs:
+            return info_dialog(self.gui, 'Nifty', 'Nothing to download.' + ''.join('\n' + p for p in problems), show=True)
+        if len(refs) > 15 and not question_dialog(
+                self.gui, 'Nifty', f'Download {len(refs)} stories or series? Each chapter is a separate request (about one per second), '
+                                   'so large series take a while. You can cancel and keep what was fetched.'):
+            return
+        skip_ids = self.existing_ids() if skip else set()
+        stories, failures, counters = [], [], {'skipped': 0}
+
+        def work(task):
+            fetcher = core.Fetcher(cancelled=task.cancelled)
+            for n, ref in enumerate(refs, 1):
+                def progress(msg, n=n):
+                    task.status = f'[{n}/{len(refs)}] {msg}'
+                task.status = f"[{n}/{len(refs)}] {ref['title']}"
+                try:
+                    got, skipped = core.download_ref(fetcher, ref, skip_ids, progress)
+                    stories.extend(got)
+                    counters['skipped'] += skipped
+                except core.Cancelled:
+                    raise
+                except Exception as exc:
+                    failures.append(f"{ref['id']}: {exc}")
+
+        task = run_task(self.gui, 'Downloading stories…', work)  # on cancel, books fetched so far are still imported
+        if task.error:
+            failures.append(str(task.error))
+        added, build_errors = libkit.import_stories(self.gui, stories, combine, title, core.build_epub, IDENTIFIER, core.PUBLISHER)
+        lines = [f'{added} book(s) added.']
+        if counters['skipped']:
+            lines.append(f"{counters['skipped']} already in the library, skipped.")
+        if task.cancelled():
+            lines.append('Cancelled; books downloaded before that were kept.')
+        info_dialog(self.gui, 'Nifty download complete', '\n'.join(lines + problems + failures + build_errors), show=True)
