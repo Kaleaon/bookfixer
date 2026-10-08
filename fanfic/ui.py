@@ -4,17 +4,23 @@ from qt.core import (QCheckBox, QDialog, QDialogButtonBox, QLabel, QPlainTextEdi
 from calibre_plugins.fanfic_downloader import engine
 from calibre_plugins.fanfic_downloader.config import prefs
 
-ADVANCED_HELP = '''# FanFicFare personal.ini settings, optional. Examples (remove the # to use):
+ADVANCED_HELP = '''# FanFicFare personal.ini settings, optional. Examples (remove the # to use).
+# Each [section] header may appear only once: put all of a site's lines under one header.
+#
+# Royal Road through a FlareSolverr server you run yourself (see docs/royalroad-flaresolverr.md):
+#[www.royalroad.com]
+#use_flaresolverr_proxy:true
+#
+# A login for one site:
 #[www.royalroad.com]
 #username:you@example.com
 #password:your-password
 #
+# Read pages from your browser's cache instead:
 #[defaults]
-#use_browser_cache:true
 #browser_cache_path:/home/you/.cache/google-chrome/Default/Cache/Cache_Data
-#
-#[defaults]
-#use_flaresolverr_proxy:true
+#[www.royalroad.com]
+#use_browser_cache:true
 '''
 
 

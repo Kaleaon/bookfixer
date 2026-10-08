@@ -91,6 +91,25 @@ class AdapterTests(unittest.TestCase):
         for domain in engine.ADULT_DOMAINS:
             self.assertTrue(any(s == domain or s.endswith('.' + domain) for s in sites), domain)
 
+    def test_flaresolverr_snippet_from_the_guide_is_read_for_royal_road(self):
+        from io import StringIO
+        ns = engine.load()
+        url = 'https://www.royalroad.com/fiction/21220'
+        cfg = ns.Configuration(ns.adapters.getConfigSectionsFor(url), 'epub')
+        cfg.read_file(StringIO(ns.defaults_ini))
+        cfg.read_file(StringIO('[www.royalroad.com]\nuse_flaresolverr_proxy:true\n'))
+        self.assertEqual(str(cfg.getConfig('use_flaresolverr_proxy')).lower(), 'true')
+        self.assertEqual(cfg.getConfig('flaresolverr_proxy_port', '8191'), '8191')
+        other = ns.Configuration(ns.adapters.getConfigSectionsFor('https://archiveofourown.org/works/1'), 'epub')
+        other.read_file(StringIO(ns.defaults_ini))
+        other.read_file(StringIO('[www.royalroad.com]\nuse_flaresolverr_proxy:true\n'))
+        self.assertFalse(other.getConfig('use_flaresolverr_proxy'))  # per-site, as the guide recommends
+
+    def test_guide_snippet_matches_the_documented_section_name(self):
+        guide = (ROOT / 'docs' / 'royalroad-flaresolverr.md').read_text(encoding='utf-8')
+        self.assertIn('[www.royalroad.com]\nuse_flaresolverr_proxy:true', guide)
+        self.assertIn('www.royalroad.com', [d for d, _, _ in engine.supported_sites()])
+
     def test_explain(self):
         ns = engine.load()
         self.assertIn('Allow adult sites', engine.explain(ns.exceptions.AdultCheckRequired('https://x')))
