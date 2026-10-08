@@ -21,3 +21,16 @@ The plugin menu also includes **Repair selected books already in Calibre**. Sele
 Version 1.0.1 was tested with the shared January 2025 export part 003: all 51 books recovered and imported into Calibre 9.15 with no errors. Content inspection identified 47 EPUBs and four PDFs; 16 of those EPUBs had been named `.pdf`. Calibre recovered known authors for 48 books and covers for all 51. Takeout ZIPs are streamed per member, allowing the archive itself to exceed the individual-book size limit. Other parts of the export and the full October 2026 export were not validated.
 
 Optional comic conversion was also verified with both real image-only PDFs (45 pages each): all pages rendered and both CBZs imported successfully. Both text-bearing PDFs stayed PDF. Lossless rendering took several minutes per comic in this environment.
+
+# EPUB Promo Scrubber for Calibre
+
+Install `dist/EpubPromoScrubber.zip` the same way (Preferences → Plugins → Load plugin from file), restart, and add **EPUB Promo Scrubber** to a toolbar if needed. It removes marks that sites add on top of a book: "Downloaded from …" banner pages and lines, hyperlinks to those sites, and site names in the book's metadata. Built-in names are OceanofPDF, PDFDrive, Z-Library, LibGen and Library Genesis. **Settings…** lets you add more site names, domains or `re:` regular expressions, and toggle the options below.
+
+- **Scrub selected books in Calibre** rewrites each selected book's EPUB and also cleans the library's title, publisher and comments fields. The unmodified EPUB is kept as ORIGINAL_EPUB unless you turn that off.
+- **Scrub EPUB file or folder** writes cleaned copies and a `scrub-report.json` to a separate folder; originals are untouched.
+
+What it does inside the EPUB: deletes short blocks (250 characters or fewer) that name a blocked site; unwraps or removes links to it; trims leftover mentions in longer paragraphs; deletes pages that end up empty, along with their spine, contents and guide entries; cleans Dublin Core metadata and the ZIP comment. Optionally, short "Downloaded from <any website>" / "free ebooks" blocks from unlisted sites are removed too. Links to an author's or publisher's own site are kept. Every change is listed in the report.
+
+Limits: watermarks baked into images or cover art are not detected. XHTML files that are not well-formed XML (including older files relying on `&nbsp;`-style DTD entities, and encrypted files) are left unchanged and flagged in the report. DRM is not touched. The text-matching rules can remove legitimate short passages that mention a blocked name, which is why the original is kept by default and each removal is reported.
+
+Testing: the cleaning logic has unit tests (`python -m unittest tests.test_scrubber`) run against synthetic EPUBs. The Calibre GUI wrapper (`scrubber_plugin/action.py`) has **not** been run inside Calibre, and no real-world EPUBs have been tried.
