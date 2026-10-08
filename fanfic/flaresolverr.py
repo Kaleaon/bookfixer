@@ -2,9 +2,16 @@
 
 Nothing here contacts a website except through the user's own FlareSolverr, and only when they press a test button.
 """
+import atexit
 import configparser
 import json
+import os
 import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -128,3 +135,120 @@ def enable_in_ini(text, section=SECTION):
         else:
             new = lines[:start + 1] + [wanted] + lines[start + 1:]
     return '\n'.join(new) + '\n', True
+
+
+# ---------------------------------------------------------------- launching a FlareSolverr executable the user chose
+LOCAL_ADDRESSES = ('localhost', '127.0.0.1', '::1')
+WINDOWS_PROGRAMS = ('.exe', '.bat', '.cmd')
+
+
+def validate_executable(path):
+    """Return a problem description, or '' if the file looks launchable."""
+    path = os.path.expanduser(path or '')
+    if not path:
+        return 'No FlareSolverr program has been chosen.'
+    if not os.path.isfile(path):
+        return f'That file does not exist: {path}'
+    if sys.platform.startswith('win'):
+        if not path.lower().endswith(WINDOWS_PROGRAMS):
+            return 'On Windows, choose the flaresolverr.exe file from the folder you unpacked.'
+    elif not os.access(path, os.X_OK):
+        return f'That file is not marked executable. In a terminal: chmod +x "{path}"'
+    return ''
+
+
+def looks_like_flaresolverr(path):
+    return 'flaresolverr' in os.path.basename(path or '').lower()
+
+
+def _log_tail(path, lines=12):
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as stream:
+            tail = stream.read()[-4000:].strip().splitlines()[-lines:]
+        return '\n'.join(tail)
+    except OSError:
+        return ''
+
+
+class Launcher:
+    """Starts and stops one FlareSolverr process on this computer. Only ever runs the file it is given."""
+
+    def __init__(self):
+        self.process = None
+        self.log_path = None
+        self._registered = False
+
+    def running(self):
+        return self.process is not None and self.process.poll() is None
+
+    def start(self, path, settings, wait=90, cancelled=lambda: False):
+        """Launch the program and wait until it answers. Returns (ok, message)."""
+        problem = validate_executable(path)
+        if problem:
+            return False, problem
+        if settings['address'].lower() not in LOCAL_ADDRESSES:
+            return False, (f"Your settings point FlareSolverr at {settings['address']}, which is another machine. "
+                           'Start it there, or change the address in Advanced settings back to localhost.')
+        if self.running():
+            return True, f'FlareSolverr was already started by this plugin (process {self.process.pid}).'
+        ok, _ = check_server(settings, timeout=3)
+        if ok:
+            return True, 'Something is already answering as FlareSolverr at that address, so no second copy was started.'
+        path = os.path.abspath(os.path.expanduser(path))
+        env = dict(os.environ, HOST='127.0.0.1', PORT=str(settings['port']))  # reachable from this computer only
+        env.setdefault('LOG_LEVEL', 'info')
+        handle, self.log_path = tempfile.mkstemp(prefix='flaresolverr-', suffix='.log')
+        kwargs = {}
+        if sys.platform.startswith('win'):
+            kwargs['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+        else:
+            kwargs['start_new_session'] = True  # its own process group, so stopping it also stops the browser it starts
+        try:
+            with os.fdopen(handle, 'wb') as log:
+                self.process = subprocess.Popen([path], cwd=os.path.dirname(path), env=env, stdin=subprocess.DEVNULL,
+                                                stdout=log, stderr=subprocess.STDOUT, **kwargs)
+        except OSError as exc:
+            self.process = None
+            return False, f'Could not start {path}: {exc}'
+        if not self._registered:
+            atexit.register(self.stop)  # do not leave a browser server running after Calibre quits
+            self._registered = True
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if cancelled():
+                self.stop()
+                return False, 'Cancelled; FlareSolverr was stopped.'
+            code = self.process.poll()
+            if code is not None:
+                self.process = None
+                tail = _log_tail(self.log_path)
+                return False, f'FlareSolverr exited straight away (code {code}).' + (f' Its last output:\n{tail}' if tail else '')
+            ok, _ = check_server(settings, timeout=2)
+            if ok:
+                return True, f'FlareSolverr started (process {self.process.pid}) and is answering at {endpoint(settings)}.'
+            time.sleep(0.5)
+        tail = _log_tail(self.log_path)
+        self.stop()
+        return False, f'FlareSolverr did not start answering within {wait} seconds and was stopped.' + (f' Its last output:\n{tail}' if tail else '')
+
+    def stop(self):
+        """Stop the process this object started, including any browser it launched. Returns a message."""
+        process, self.process = self.process, None
+        if process is None or process.poll() is not None:
+            return 'This plugin has no running FlareSolverr to stop (one started another way is left alone).'
+        try:
+            if sys.platform.startswith('win'):
+                subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], capture_output=True, timeout=20)
+            else:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            process.kill()
+        return 'FlareSolverr stopped.'
+
+
+launcher = Launcher()

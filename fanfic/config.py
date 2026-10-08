@@ -5,3 +5,4 @@ prefs.defaults['allow_adult'] = False   # adult-only sites are refused, and adul
 prefs.defaults['extra_adult'] = ''      # extra domains to treat as adult sites, one per line
 prefs.defaults['skip_existing'] = True
 prefs.defaults['advanced_ini'] = ''     # FanFicFare personal.ini text
+prefs.defaults['flaresolverr_path'] = ''  # FlareSolverr program the setup dialog may start

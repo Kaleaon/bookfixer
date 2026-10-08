@@ -41,6 +41,19 @@ installed. Other CPU types should use the Docker image.
 
 FlareSolverr starts a new browser for each request, so it uses a fair amount of memory.
 
+**Let the plugin start it for you.** Instead of a terminal, you can download the executable as above, unpack it somewhere
+permanent, then in this window press **Choose FlareSolverr program…** and select the `flaresolverr` (or `flaresolverr.exe`)
+file, and then **Start FlareSolverr**. Details worth knowing:
+
+- It runs only the file you chose, and asks first if the file is not named like FlareSolverr.
+- It starts it so that only this computer can reach it (host `127.0.0.1`, on the port from your settings, 8191 by default).
+  If your settings point at another machine's address it will not start anything.
+- It will not start a second copy if something is already answering on that port.
+- The first start can take a minute. If it exits straight away, the last lines of its output are shown here.
+- **Stop FlareSolverr** ends it and the browser it started. It is also stopped when Calibre closes. A copy you started yourself
+  (Docker, or a terminal) is never touched by the Stop button.
+- The standalone builds exist only for Windows and Linux on x64 processors. On macOS and other processors use Docker.
+
 ## 2. Check that it answers
 
 ```bash
