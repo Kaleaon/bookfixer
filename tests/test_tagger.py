@@ -1,6 +1,9 @@
 import importlib.util
 from pathlib import Path
+import sys
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tagger'))
 
 spec = importlib.util.spec_from_file_location('rules', Path(__file__).resolve().parents[1] / 'tagger/rules.py')
 rules = importlib.util.module_from_spec(spec)
@@ -27,6 +30,25 @@ class DetectTests(unittest.TestCase):
         text = book(1, comments='<p>originally on royalroad.com</p>')
         self.assertEqual(rules.detect_sites(text, s), [])
         self.assertEqual(rules.detect_sites(text, s, scan_comments=True), ['Royal Road'])
+
+
+class FanFicFareTests(unittest.TestCase):
+    def test_fanficfare_identifier_form(self):
+        # FanFicFare stores url identifiers with ':' turned into '|', and the publisher is the site's domain.
+        s = rules.DEFAULT_SITES
+        rr = book(1, identifiers={'url': 'https|//www.royalroad.com/fiction/21220'}, publisher='www.royalroad.com')
+        self.assertEqual(rules.detect_sites(rr, s), ['Royal Road'])
+        sb = book(2, identifiers={'url': 'https|//forums.spacebattles.com/threads/x.1/'})
+        self.assertEqual(rules.detect_sites(sb, s), ['SpaceBattles'])
+        self.assertEqual(rules.detect_sites(book(3, identifiers={'url': 'https|//archiveofourown.org/works/1'}), s), ['Archive of Our Own'])
+        self.assertEqual(rules.detect_sites(book(4, identifiers={'uri': 'https|//www.scribblehub.com/series/1/'}), s), ['Scribble Hub'])
+
+    def test_table_has_no_duplicate_hosts(self):
+        hosts = [h for _, hs, _ in rules.DEFAULT_SITES for h in hs]
+        self.assertEqual(len(hosts), len(set(hosts)))
+        self.assertGreater(len(rules.DEFAULT_SITES), 100)
+        names = [n for n, _, _ in rules.DEFAULT_SITES]
+        self.assertEqual(names.count('Metabods'), 1)
 
 
 class ParseTests(unittest.TestCase):

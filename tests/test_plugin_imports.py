@@ -60,9 +60,11 @@ class PluginImportTests(unittest.TestCase):
         return package
 
     def test_every_plugin_module_imports(self):
-        for import_name in build_plugins.PLUGINS_BY_IMPORT:
+        self.load('metabods_downloader')  # builds everything that can be built in this environment
+        for import_name in self.built:
             package = self.load(import_name)
-            modules = ['config', 'action', 'rules'] if import_name == 'story_collection_tagger' else ['config', 'action', 'ui', 'core']
+            modules = {'story_collection_tagger': ['config', 'action', 'rules'],
+                       'fanfic_downloader': ['config', 'action', 'ui', 'engine']}.get(import_name, ['config', 'action', 'ui', 'core'])
             for module in modules:
                 with self.subTest(plugin=import_name, module=module):
                     importlib.import_module(f'{package}.{module}')

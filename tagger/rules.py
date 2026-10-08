@@ -4,8 +4,13 @@ Everything here is additive: the plan only ever adds tags, never removes or rena
 """
 import re
 
+try:
+    from .fff_sites import FFF_SITES
+except ImportError:  # tests load this file directly
+    from fff_sites import FFF_SITES
+
 # (display name, hosts, identifier keys that mean "this came from there")
-DEFAULT_SITES = [
+CORE_SITES = [
     ('Metabods', ['metabods.com'], ['metabods']),
     ('Nifty', ['nifty.org', 'niftyarchives.org'], ['nifty']),
     ('Royal Road', ['royalroad.com', 'royalroadl.com'], ['royalroad', 'royalroadl']),
@@ -22,6 +27,27 @@ DEFAULT_SITES = [
     ('Fur Affinity', ['furaffinity.net'], []),
     ('Tapas', ['tapas.io'], []),
 ]
+
+
+
+def _covered(host, claimed):
+    return any(host == c or host.endswith('.' + c) for c in claimed)
+
+
+def _merge_sites(core, extra):
+    """Curated entries win; generated FanFicFare entries only add hosts not already covered (subdomains count)."""
+    claimed = {h for _, hosts, _ in core for h in hosts}
+    merged = list(core)
+    for name, hosts, keys in extra:
+        if _covered(hosts[0], claimed):
+            continue  # the primary host is already handled by a curated entry
+        fresh = [h for h in hosts if not _covered(h, claimed)]
+        claimed.update(fresh)
+        merged.append((name, fresh, keys))
+    return merged
+
+
+DEFAULT_SITES = _merge_sites(CORE_SITES, FFF_SITES)
 
 FIELDS = {'tag': 'tags', 'tags': 'tags', 'title': 'title', 'author': 'authors', 'authors': 'authors', 'series': 'series',
           'comments': 'comments', 'publisher': 'publisher', 'source': 'source', 'any': 'any'}
@@ -98,8 +124,8 @@ def detect_sites(book, sites, scan_comments=False):
         haystacks.append(book.get('comments') or '')
     found = []
     for name, hosts, keys in sites:
-        if any(k.lower() in idents for k in keys) or any(
-                _host_pattern(h).search(text) for h in hosts for text in haystacks if text):
+        if name not in found and (any(k.lower() in idents for k in keys) or any(
+                _host_pattern(h).search(text) for h in hosts for text in haystacks if text)):
             found.append(name)
     return found
 

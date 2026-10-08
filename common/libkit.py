@@ -53,3 +53,28 @@ def import_stories(gui, stories, combine, title, build_epub, identifier, publish
         gui.library_view.model().refresh()
         gui.tags_view.recount()
     return added, errors
+
+
+def add_prebuilt(gui, items):
+    """Add already-finished EPUBs. items: [(Metadata, epub bytes)]. Returns (added, errors); covers come from the EPUB."""
+    if not items:
+        return 0, []
+    db = gui.current_db.new_api
+    added, errors = 0, []
+    for mi, data in items:
+        try:
+            ids, _ = db.add_books([(mi, {'EPUB': BytesIO(data)})])
+            added += len(ids)
+            try:  # FanFicFare can embed a cover; Calibre does not pick it up from add_books
+                from calibre.ebooks.metadata.meta import get_metadata
+                cover = getattr(get_metadata(BytesIO(data), stream_type='epub'), 'cover_data', None)
+                if ids and cover and cover[1]:
+                    db.set_cover({ids[0]: cover[1]})
+            except Exception:
+                pass
+        except Exception as exc:
+            errors.append(f'{mi.title}: {exc}')
+    if added:
+        gui.library_view.model().refresh()
+        gui.tags_view.recount()
+    return added, errors
