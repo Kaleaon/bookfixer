@@ -1,0 +1,100 @@
+{
+ "docs": [
+  {
+   "author_name": [
+    "Frank Herbert"
+   ],
+   "cover_edition_key": "OL32848840M",
+   "cover_i": 11481354,
+   "first_publish_year": 1965,
+   "isbn": [
+    "9780340839935",
+    "9782266320481"
+   ],
+   "key": "/works/OL893414W",
+   "language": [
+    "heb",
+    "dut",
+    "rum"
+   ],
+   "publisher": [
+    "Berkley",
+    "Berkley Books"
+   ],
+   "title": "Dune",
+   "subject": [
+    "Dune (Imaginary place)",
+    "Fiction",
+    "Fiction, science fiction, general",
+    "Dune (imaginary place), fiction",
+    "New York Times reviewed",
+    "Science fiction"
+   ],
+   "edition_count": null
+  },
+  {
+   "author_name": [
+    "Frank Herbert"
+   ],
+   "cover_edition_key": "OL8890326M",
+   "cover_i": 980253,
+   "first_publish_year": 1969,
+   "isbn": [
+    "8418037679",
+    "9788466372015"
+   ],
+   "key": "/works/OL893461W",
+   "language": [
+    "spa",
+    "pol",
+    "dut"
+   ],
+   "publisher": [
+    "Orion Publishing Group, Limited",
+    "Putnam"
+   ],
+   "title": "Dune Messiah",
+   "subject": [
+    "American Science fiction",
+    "Dune (Imaginary place)",
+    "Fiction",
+    "Imaginary places",
+    "Science Fiction",
+    "Translations into Russian"
+   ],
+   "edition_count": null
+  },
+  {
+   "author_name": [
+    "Frank Herbert"
+   ],
+   "cover_edition_key": "OL24935059M",
+   "cover_i": 6976407,
+   "first_publish_year": 1976,
+   "isbn": [
+    "1427202915",
+    "9789759971342"
+   ],
+   "key": "/works/OL893516W",
+   "language": [
+    "dut",
+    "chi",
+    "por"
+   ],
+   "publisher": [
+    "Berkley",
+    "Acervo"
+   ],
+   "title": "Children of Dune",
+   "subject": [
+    "Dune (Imaginary place)",
+    "Fiction",
+    "Fiction in English",
+    "Science Fiction",
+    "Dune (imaginary place), fiction",
+    "Fiction, science fiction, general"
+   ],
+   "edition_count": null
+  }
+ ]
+}

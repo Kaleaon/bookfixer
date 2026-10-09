@@ -17,6 +17,7 @@ PLUGINS = {
     'FanficDownloader.zip': ('fanfic', 'fanfic_downloader', SHARED, True),
     'RedditStoryFollower.zip': ('reddit', 'reddit_follower', SHARED, False),
     'GeminiLibraryFixer.zip': ('gemini', 'gemini_library_fixer', ['storykit.py', 'guikit.py'], False),
+    'MediaMatcher.zip': ('media', 'media_matcher', ['storykit.py', 'guikit.py'], False),
 }
 PLUGINS_BY_IMPORT = [v[1] for v in PLUGINS.values()]
 
