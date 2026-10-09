@@ -922,6 +922,108 @@ class RedditPluginTests(QtCase):
         self.assertEqual(len([n for n in z.namelist() if n.startswith('OEBPS/s001_')]), 3)
 
 
+class GeminiDb:
+    """Just enough of Calibre's db.new_api for the Gemini fixer: books in memory, every write recorded."""
+
+    def __init__(self):
+        self.books = {
+            1: dict(title='dune messiah [epub]', authors=['Herbert, Frank'], series='', series_index=1.0, tags=['Sci-Fi'], languages=[]),
+            2: dict(title='Fine Book', authors=['A B'], series='', series_index=1.0, tags=[], languages=['eng']),
+            3: dict(title='Cooking Today', authors=['C D'], series='', series_index=1.0, tags=[], languages=['eng']),
+        }
+        self.writes = []
+
+    def get_metadata(self, book_id, get_cover=False):
+        return types.SimpleNamespace(publisher='', **self.books[book_id])
+
+    def formats(self, book_id):
+        return ['EPUB']
+
+    def format_abspath(self, book_id, fmt):
+        return f'/lib/{book_id}.epub'
+
+    def all_book_ids(self):
+        return set(self.books)
+
+    def has_id(self, book_id):
+        return book_id in self.books
+
+    def set_field(self, name, mapping):
+        self.writes.append((name, dict(mapping)))
+
+
+@unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')
+class GeminiDialogTests(QtCase):
+    def test_check_apply_and_undo_through_the_real_window(self):
+        import json
+        package = self.load('gemini_library_fixer')
+        sys.modules['calibre.gui2.actions'].InterfaceAction = object
+        engine = importlib.import_module(package + '.engine')
+        action_mod = importlib.import_module(package + '.action')
+        answers = [
+            {'id': 1, 'title': 'Dune Messiah', 'authors': ['Frank Herbert'], 'series': 'Dune', 'series_index': 2, 'tags': ['Science Fiction'],
+             'language': 'eng', 'confidence': 'high', 'reason': 'junk in title'},
+            {'id': 3, 'title': 'Totally Different Novel', 'confidence': 'high', 'reason': 'guess'},
+        ]
+        canned = json.dumps({'candidates': [{'content': {'parts': [{'text': json.dumps(answers)}]}}]}).encode()
+        engine._post = lambda url, headers, body, timeout: canned  # Google is replaced; the key never leaves this process
+
+        db = GeminiDb()
+        gui = QtWidgets.QWidget()  # the dialog needs a real parent widget; the rest of Calibre's window is a stand-in
+        gui.current_db = MagicMock(new_api=db)
+        gui.library_view = MagicMock()
+        gui.library_view.get_selected_ids.return_value = [1, 2, 3]
+        gui.tags_view = MagicMock()
+        action = action_mod.GeminiFixerAction()
+        action.gui = gui
+        config = importlib.import_module(package + '.config')
+        action_mod.prefs['api_key'] = 'test-key'
+        seen = {}
+
+        def drive(dialog):
+            def button(text):
+                return next(b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == text)
+            tree = dialog.findChild(QtWidgets.QTreeWidget)
+            button('Check books').click()
+            seen['rows'] = [(tree.topLevelItem(i).text(0), tree.topLevelItem(i).checkState(0), tree.topLevelItem(i).childCount())
+                            for i in range(tree.topLevelItemCount())]
+            self.assertTrue(button('Apply ticked changes').isEnabled())
+            button('Apply ticked changes').click()
+            seen['undo'] = dict(action_mod.prefs['undo'])
+            self.assertTrue(button('Undo last run').isEnabled())
+            seen['writes_after_apply'] = list(db.writes)
+            button('Undo last run').click()
+
+        original_exec = QtWidgets.QDialog.exec
+        QtWidgets.QDialog.exec = drive
+        try:
+            action.show_dialog()
+        finally:
+            QtWidgets.QDialog.exec = original_exec
+
+        T = QtCore.Qt.CheckState
+        rows = {r[0]: r[1] for r in seen['rows']}  # books are asked about grouped by author, so the order is not the library's
+        self.assertEqual(set(rows), {'dune messiah [epub]', 'Cooking Today'})
+        self.assertEqual(rows['dune messiah [epub]'], T.Checked, 'a tidy-up starts ticked')
+        self.assertEqual(rows['Cooking Today'], T.Unchecked, 'a very different title is a BIG CHANGE and starts unticked')
+        writes = dict(((n, tuple(m.items())) for n, m in seen['writes_after_apply']))
+        self.assertEqual(writes['title'], ((1, 'Dune Messiah'),))
+        self.assertEqual(writes['authors'], ((1, ('Frank Herbert',)),))
+        self.assertEqual(writes['series'], ((1, 'Dune'),))
+        self.assertEqual(writes['series_index'], ((1, 2.0),))
+        self.assertEqual(writes['tags'], ((1, ('Sci-Fi', 'Science Fiction')),))
+        self.assertEqual(writes['languages'], ((1, ('eng',)),))
+        self.assertFalse(any(list(m)[0] == 3 for _, m in seen['writes_after_apply']), 'the unticked book must not be written')
+        self.assertEqual(seen['undo']['1']['title'], 'dune messiah [epub]')
+        restored = {n: list(m.values())[0] for n, m in db.writes[len(seen['writes_after_apply']):]}
+        self.assertEqual(restored['title'], 'dune messiah [epub]')
+        self.assertEqual(restored['authors'], ('Herbert, Frank',))
+        self.assertIsNone(restored['series'])
+        self.assertEqual(restored['tags'], ('Sci-Fi',))
+        self.assertEqual(restored['languages'], ())
+        self.assertEqual(dict(action_mod.prefs['undo']), {}, 'a clean undo clears the saved run')
+
+
 @unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')
 class FanficDialogTests(QtCase):
     @classmethod

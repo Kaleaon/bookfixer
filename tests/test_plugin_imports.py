@@ -64,6 +64,7 @@ class PluginImportTests(unittest.TestCase):
         for import_name in self.built:
             package = self.load(import_name)
             modules = {'story_collection_tagger': ['config', 'action', 'rules'],
+                       'gemini_library_fixer': ['config', 'action', 'engine'],
                        'fanfic_downloader': ['config', 'action', 'ui', 'engine', 'flaresolverr']}.get(import_name, ['config', 'action', 'ui', 'core'])
             for module in modules:
                 with self.subTest(plugin=import_name, module=module):
