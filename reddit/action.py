@@ -168,6 +168,8 @@ class FollowerAction(InterfaceAction):
         cache = core.ChapterCache(self.cache_dir(), follow['id'])
         if not cache.posts:
             return ''
+        if follow.get('layout') == 'each':
+            return self.update_each(follow, cache)
         story = core.build_story(follow, cache)
         if not has_changes and libkit.find_book(self.gui, IDENTIFIER, story['id']) is not None:
             return ''
@@ -178,3 +180,23 @@ class FollowerAction(InterfaceAction):
             return f'could not update the book ({exc})'
         count = len(story['sections'])
         return f'added to your library with {count} chapter(s)' if created else f'book updated, now {count} chapter(s)'
+
+    def update_each(self, follow, cache):
+        """Make a separate library book from each cached post that has none yet. Returns a message or ''."""
+        added, errors = 0, 0
+        for post in core.pending_each(follow, cache):
+            story = core.build_each(follow, post)
+            try:
+                mi = libkit.metadata_for([story], None, IDENTIFIER, core.PUBLISHER)
+                libkit.upsert_epub(self.gui, mi, core.build_epub(story), IDENTIFIER, story['id'])
+            except Exception:
+                errors += 1
+                continue
+            cache.data.setdefault('added', []).append(post['id'])
+            added += 1
+        if added or errors:
+            cache.save()
+        left = len(core.pending_each(follow, cache, limit=10 ** 6))
+        parts = ([f'{added} new book(s) added'] if added else []) + ([f'{errors} could not be added'] if errors else []) + \
+                ([f'{left} more waiting for the next check'] if left else [])
+        return ', '.join(parts)

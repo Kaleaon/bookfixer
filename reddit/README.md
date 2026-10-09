@@ -48,6 +48,18 @@ If you counted more than about 1,800 chapters, I could not find the difference: 
 
 **Comments.** The author puts one top-level comment under each chapter: a preface on Part 1, later mostly Patreon and book links, a blurb for other stories, "most relevant chapters" links and fan links, and sometimes a real note (a schedule change, for example). Reader comments are discussion and are not included. Tick *Also keep the author's own comment* in the Add/Edit dialog to append it under each chapter as "Author's comment". It needs the official API and costs one request per chapter, so a long series is filled in batches of 300 chapters per check (about ten minutes each, newest first), with the next batch due again within 15 minutes. Other comments mention chapters only by link (a bot lists earlier parts); I found no separate chapter names in them.
 
+## A subreddit of stand-alone stories (r/gayincest_stories and similar)
+
+Some communities are not one author's series but many authors posting one story per post. In the Add/Edit dialog choose **A separate book for each post** (the Quick start has an entry for r/gayincest_stories). Then:
+
+- Each matching post becomes its own book, with the post's author as the book's author and its date as the publication date.
+- The post's **flair** becomes tags: `TRUE STORY - Uncle` gives the tags `TRUE STORY` and `Uncle`; `FICTION - Dad/In-Law/Step` gives `FICTION` and `Dad/In-Law/Step`. Use *Flair contains* to take only some (for example `FICTION`, or `re:Uncle|Cousin`). Flair is only available through the official API, not the public feed.
+- A title like `The Lake House, Part 3` joins the Calibre series `The Lake House` as number 3; the other parts are matched by the same wording before "Part". Parts whose titles word the start differently are not grouped.
+- The first check takes only the **newest 25** matching posts, not the community's backlog, and at most 50 new books are added per check (the rest wait for the next one). Edited posts become a fresh book.
+- Posts whose title states an age under 18 (such as `[16M]`, `(17)` or `15 yo`) are skipped. This only reads the title: it cannot know ages that are not in the title, and a bracketed number that is not an age also counts, so it errs on the side of skipping. Whether every post in a large community follows its rules is something the plugin cannot check; the Add dialog's *Posted by* box can restrict a follow to authors you trust.
+
+What I looked at: the community's public listing, with the official API (it is marked 18+, about 96,000 members, not quarantined). Of the newest 100 posts every one was a text post with flair, from 59 different authors, with a median length of about 4,600 characters; the plugin's own run on the newest 25 produced 25 books, 11 of them in 9 Calibre series. I did not read any story text.
+
 ## Two ways to read Reddit, and what is known about each
 
 | | Public feeds (default) | Official API (your own credentials) |

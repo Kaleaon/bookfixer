@@ -31,6 +31,9 @@ MIN_FEED_INTERVAL = 7.0       # seconds between requests without credentials (Re
 MIN_API_INTERVAL = 2.0        # seconds between requests through the official API
 FIRST_RUN_PAGES = 30         # newest 3000 posts at most per backfill pass; a longer history is finished by the next check
 NOTE_BATCH = 300             # author comments fetched per check (one request each); the rest follow on the next checks
+EACH_FIRST_RUN = 25          # 'each post is a book' follows add only the newest few on the first check, not a whole backlog
+EACH_FIRST_PAGES = 5
+EACH_PER_RUN = 50            # books added to the library per check
 NOTES_GAP_HOURS = 0.25       # how soon a check that still owes author comments may run again
 NAV_WORDS = r'(?:first|previous|prev|next|latest|last|index|wiki|series|home|start|final|chapter|part|start here|table of contents|toc)'
 
@@ -95,6 +98,9 @@ PRESETS = [
     {'label': 'Out of Cruel Space (r/HFY, by KyleKKent)', 'name': 'Out of Cruel Space', 'source': 'u/KyleKKent',
      # the author renamed the series part-way: "Out of Cruel Space, Part N" became "OOCS, Into A Wider Galaxy, Part N"
      'title_filter': 're:^\\s*(Out of Cruel Space|OOCS)\\b.*\\d', 'author_filter': 'KyleKKent'},
+    # many authors, one story per post, each with a flair; every post becomes its own book (newest few on the first check)
+    {'label': 'r/gayincest_stories (each post as its own book)', 'name': 'r/gayincest_stories', 'source': 'r/gayincest_stories',
+     'title_filter': '', 'author_filter': '', 'flair_filter': '', 'layout': 'each'},
 ]
 
 
@@ -238,7 +244,7 @@ def parse_listing(json_text):
             'created': float(d.get('created_utc') or 0),
             'link': 'https://www.reddit.com' + d.get('permalink', ''),
             'html': main_html(d['selftext_html']) if d.get('selftext_html') else '',
-            'subreddit': d.get('subreddit', ''),
+            'subreddit': d.get('subreddit', ''), 'flair': (d.get('link_flair_text') or '').strip(),
         })
     return entries, listing.get('after')
 
@@ -358,11 +364,12 @@ def probe(source, src, follow=None, limit=25):
 
 # ---------------------------------------------------------------- follows, filters, and the chapter cache
 
-def new_follow(name, source_text, title_filter='', author_filter='', author_note=False):
+def new_follow(name, source_text, title_filter='', author_filter='', author_note=False, layout='series', flair_filter=''):
     src = parse_source(source_text)
     return {'id': uuid.uuid4().hex[:10], 'name': name.strip() or describe_source(src), 'source': src,
             'title_filter': title_filter.strip(), 'author_filter': author_filter.strip().lstrip('/').replace('u/', '', 1),
-            'author_note': bool(author_note), 'last_checked': 0.0, 'last_status': ''}
+            'author_note': bool(author_note), 'layout': 'each' if layout == 'each' else 'series', 'flair_filter': flair_filter.strip(),
+            'last_checked': 0.0, 'last_status': ''}
 
 
 def matches(entry, follow):
@@ -379,8 +386,39 @@ def matches(entry, follow):
                 return False
         elif flt.casefold() not in entry['title'].casefold():
             return False
+    if not _text_matches(follow.get('flair_filter', ''), entry.get('flair', '')):
+        return False
+    if follow.get('layout') == 'each' and stated_minor_age(entry['title']):
+        return False
     author = follow.get('author_filter', '')
     return not author or entry.get('author', '').casefold() == author.casefold()
+
+
+def _text_matches(flt, text):
+    if not flt:
+        return True
+    if flt.lower().startswith('re:'):
+        try:
+            return bool(re.search(flt[3:], text, re.I))
+        except re.error:
+            return False
+    return flt.casefold() in text.casefold()
+
+
+_AGE_TAGS = re.compile(r'[\[(]\s*[mfMF]?\s*(\d{1,2})\s*[mfMF]?\s*[\])]')
+_AGE_WORDS = re.compile(r'(?i)\b(\d{1,2})\s*(?:yo|y/o|y\.o\.|years?[ -]old)\b')
+_AGE_LETTER = re.compile(r'(?i)\b(\d{1,2})\s?[mf]\b')
+
+
+def stated_minor_age(title):
+    """True if the title states an age under 18 (such as [16M], (17), 15 yo). A title-only check: it cannot know about ages
+    that are not in the title, and a bracketed number that is not an age (a part number) counts too, so it errs on the side
+    of skipping. Applied to 'each post is a book' follows, which take posts from many authors."""
+    for pattern in (_AGE_TAGS, _AGE_WORDS, _AGE_LETTER):
+        for m in pattern.finditer(title):
+            if 1 <= int(m.group(1)) < 18:
+                return True
+    return False
 
 
 class ChapterCache:
@@ -425,12 +463,14 @@ def check_follow(source, follow, cache, max_pages=None, cancelled=lambda: False,
     src = follow['source']
     # a history is "complete" once a pass has read all the way back; until then each check keeps backfilling (older caches
     # from before this was tracked count as incomplete, so they are topped up once)
-    signature = [follow.get('title_filter', ''), follow.get('author_filter', ''), source_text(src)]
+    signature = [follow.get('title_filter', ''), follow.get('author_filter', ''), source_text(src), follow.get('flair_filter', ''),
+                 follow.get('layout', 'series')]
     if cache.data.get('signature') != signature:
         cache.data['complete'] = False  # the filters changed, so older posts may now belong
         cache.data['signature'] = signature
     first_run = not cache.data.get('complete')
-    max_pages = max_pages or (FIRST_RUN_PAGES if first_run else 3)
+    each = follow.get('layout') == 'each'
+    max_pages = max_pages or ((EACH_FIRST_PAGES if each else FIRST_RUN_PAGES) if first_run else 3)
     known_newest, known_id = cache.data['newest_created'], cache.data['newest_id']
     new, changed, after, pages, newest = [], [], None, 0, (0.0, '')
     try:
@@ -446,6 +486,8 @@ def check_follow(source, follow, cache, max_pages=None, cancelled=lambda: False,
                     newest = (e['created'], e['id'])
                 if not first_run and (e['id'] == known_id or (known_newest and e['created'] < known_newest - 1)):
                     reached_known = True
+                if not first_run and known_newest and e['created'] < known_newest - 1 and e['id'] not in cache.posts:
+                    continue  # older than anything collected and never kept: not part of this check ('each' follows skip their backlog on purpose)
                 if not matches(e, follow):
                     continue
                 old = cache.posts.get(e['id'])
@@ -453,15 +495,23 @@ def check_follow(source, follow, cache, max_pages=None, cancelled=lambda: False,
                     new.append(e['title'])
                 elif old['html'] != e['html'] or old['title'] != e['title']:
                     changed.append(e['title'])
+                    if e['id'] in cache.data.get('added', []):
+                        cache.data['added'].remove(e['id'])  # an edited post becomes a fresh book
                 else:
                     continue
-                cache.posts[e['id']] = {k: e[k] for k in ('id', 'title', 'author', 'created', 'link', 'html')}
+                cache.posts[e['id']] = {k: e.get(k, '') for k in ('id', 'title', 'author', 'created', 'link', 'html', 'flair')}
                 if old is not None and 'note' in old:
                     cache.posts[e['id']]['note'] = old['note']
             if not entries or not after or reached_known:
                 if first_run and (not entries or not after):
                     cache.data['complete'] = True
                 break
+        if each and first_run:
+            cache.data['complete'] = True  # never backfills; only the newest few are taken
+            keep = {p['id'] for p in sorted(cache.posts.values(), key=lambda p: p['created'], reverse=True)[:EACH_FIRST_RUN]}
+            for post_id in [i for i in cache.posts if i not in keep]:
+                del cache.posts[post_id]
+            new = [t for t in new if any(p['title'] == t for p in cache.posts.values())]
     finally:
         if newest[0]:
             cache.data['newest_created'], cache.data['newest_id'] = max(known_newest, newest[0]), newest[1] if newest[0] >= known_newest else known_id
@@ -511,6 +561,33 @@ def build_story(follow, cache):
             'sections': [(p['title'], chapter_html(p)) for p in posts], 'tags': tags, 'categories': [],
             'summary': f"{len(posts)} chapters collected from Reddit ({describe_source(src)}), {first} to {last}.",
             'publisher': PUBLISHER, 'pubdate': first}
+
+
+_PART = re.compile(r"(?i)^(?P<stem>.*?)[\s,:;\-\u2013\u2014(\[]*\b(?:part|pt\.?|chapter|ch\.?)\s*(?P<n>\d+)\b")
+
+
+def build_each(follow, post):
+    """One post as its own story dict: flair becomes tags ('TRUE STORY - Uncle' -> 'TRUE STORY', 'Uncle'), and a title like
+    'Name, Part 3' joins the Calibre series 'Name' (index 3)."""
+    m = re.search(r'/r/([^/]+)/', post.get('link', ''))
+    tags = ['Reddit'] + ([f'r/{m.group(1)}'] if m else [])
+    for piece in re.split(r'\s+[-\u2013\u2014]\s+', post.get('flair', '')):
+        if piece.strip():
+            tags.append(piece.strip())
+    story = {'id': 'reddit-' + post['id'], 'url': post.get('link') or WWW, 'title': post['title'], 'author': post.get('author') or 'Unknown',
+             'sections': [(post['title'], chapter_html(post))], 'tags': list(dict.fromkeys(tags)), 'categories': [], 'summary': '',
+             'publisher': PUBLISHER,
+             'pubdate': datetime.fromtimestamp(post['created'], timezone.utc).date().isoformat()}
+    part = _PART.match(post['title'])
+    if part and len(re.sub(r'\W', '', part.group('stem'))) >= 4:
+        story['series'], story['series_index'] = part.group('stem').strip(' ,:;-\u2013\u2014'), float(part.group('n'))
+    return story
+
+
+def pending_each(follow, cache, limit=None):
+    """Cached posts not yet made into library books, oldest first (at most `limit`)."""
+    added = set(cache.data.get('added', []))
+    return [p for p in cache.ordered() if p['id'] not in added][:limit or EACH_PER_RUN]
 
 
 def build_epub(story):

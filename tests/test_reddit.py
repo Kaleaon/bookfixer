@@ -291,6 +291,74 @@ class AuthorNoteTests(unittest.TestCase):
         self.assertFalse(core.due(dict(follow, notes_pending=False), 6, now=1000.0 + 1000))
 
 
+class EachPostTests(unittest.TestCase):
+    """A subreddit of stand-alone stories by many authors: every post becomes its own book."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.preset = [p for p in core.PRESETS if p.get('layout') == 'each'][0]
+        self.follow = core.new_follow(self.preset['name'], self.preset['source'], layout='each')
+
+    def story_post(self, n, title, flair='FICTION - Cousin', author=None):
+        e = post(n, title=title, author=author or f'writer{n}')
+        e['flair'] = flair
+        return e
+
+    def test_flair_filter_and_the_age_guard(self):
+        follow = dict(self.follow, flair_filter='FICTION')
+        self.assertTrue(core.matches(self.story_post(1, 'A summer at the lake (A story)'), follow))
+        self.assertFalse(core.matches(self.story_post(1, 'A summer', flair='TRUE STORY - Uncle'), follow))
+        self.assertTrue(core.matches(self.story_post(1, 'Long weekend', flair='x'), self.follow))
+        self.assertTrue(core.matches(self.story_post(1, 'Reunion [44M] and [24M]'), self.follow))
+        for title in ('Camping trip [16M] and [40M]', 'Me (17) and him', 'I am 15 yo and', 'About 17m things', 'We were 16 years old'):
+            self.assertTrue(core.stated_minor_age(title), title)
+            self.assertFalse(core.matches(self.story_post(1, title), self.follow), title)
+        self.assertTrue(core.matches(self.story_post(1, 'Part (2)'), dict(self.follow, layout='series')), 'series follows are not age-filtered')
+        self.assertFalse(core.stated_minor_age('Born in 1990, 21 chapters, [18M] and [45M]'))
+
+    def test_first_check_takes_only_the_newest_few_and_later_checks_the_rest(self):
+        posts = [self.story_post(n, f'Story number {n}') for n in range(40, 0, -1)]
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        result = core.check_follow(FakeSource(posts, per_page=100), self.follow, cache)
+        self.assertEqual(len(cache.posts), core.EACH_FIRST_RUN)
+        self.assertEqual(len(result['new']), core.EACH_FIRST_RUN)
+        self.assertIn('t3_040', cache.posts)
+        self.assertNotIn('t3_001', cache.posts, 'the old backlog is not pulled in')
+        later = core.check_follow(FakeSource([self.story_post(41, 'Story number 41')] + posts, per_page=100), self.follow, cache)
+        self.assertEqual(later['new'], ['Story number 41'])
+
+    def test_books_are_made_once_oldest_first_and_edits_make_a_fresh_one(self):
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        core.check_follow(FakeSource([self.story_post(n, f'Story {n}') for n in (3, 2, 1)], per_page=10), self.follow, cache)
+        self.assertEqual([p['title'] for p in core.pending_each(self.follow, cache)], ['Story 1', 'Story 2', 'Story 3'])
+        cache.data['added'] = ['t3_001', 't3_002']
+        self.assertEqual([p['id'] for p in core.pending_each(self.follow, cache)], ['t3_003'])
+        edited = dict(self.story_post(2, 'Story 2'), html='<p>edited</p>')
+        core.check_follow(FakeSource([self.story_post(3, 'Story 3'), edited, self.story_post(1, 'Story 1')], per_page=10),
+                          self.follow, cache, max_pages=1)
+        self.assertEqual(cache.data['added'], ['t3_001'], 'an edited post is made into a book again')
+        self.assertEqual(len(core.pending_each(self.follow, cache, limit=1)), 1, 'at most `limit` per run')
+
+    def test_one_post_as_a_story_with_tags_and_series(self):
+        one = dict(self.story_post(7, 'The Lake House, Part 3', flair='TRUE STORY - Brother/In-Law/Step', author='writer7'),
+                   link='https://www.reddit.com/r/gayincest_stories/comments/abc/x/')
+        story = core.build_each(self.follow, one)
+        self.assertEqual((story['title'], story['author'], story['series'], story['series_index']), ('The Lake House, Part 3', 'writer7', 'The Lake House', 3.0))
+        self.assertEqual(story['tags'], ['Reddit', 'r/gayincest_stories', 'TRUE STORY', 'Brother/In-Law/Step'])
+        self.assertEqual(story['id'], 'reddit-t3_007')
+        self.assertEqual(len(story['sections']), 1)
+        self.assertNotIn('series', core.build_each(self.follow, self.story_post(8, 'Just a title')))
+        self.assertNotIn('series', core.build_each(self.follow, self.story_post(8, 'Ch 2')), 'a stem too short to name a series is ignored')
+        core.build_epub(story)
+
+    def test_listing_keeps_the_flair(self):
+        listing = json.dumps({'data': {'after': None, 'children': [{'kind': 't3', 'data': {
+            'name': 't3_a', 'title': 'T', 'author': 'w', 'created_utc': 1.0, 'permalink': '/r/x/comments/a/t/',
+            'selftext_html': '<div class="md"><p>Hi.</p></div>', 'link_flair_text': 'FICTION - Cousin'}}]}})
+        self.assertEqual(core.parse_listing(listing)[0][0]['flair'], 'FICTION - Cousin')
+
+
 class ProbeTests(unittest.TestCase):
     SRC = core.parse_source('r/HFY')
 

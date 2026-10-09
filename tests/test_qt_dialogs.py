@@ -555,6 +555,44 @@ class RedditPluginTests(QtCase):
         self.assertEqual(dialog.login_status.text(), 'Not logged in')
         self.assertTrue(any(path == '/revoke' for path, _, _ in stand.StandIn.log))
 
+    def test_each_post_becomes_its_own_book_and_the_dialog_offers_it(self):
+        core = self.core
+        dialog = self.ui.FollowDialog(None)
+        preset_index = 1 + [i for i, p in enumerate(core.PRESETS) if p.get('layout') == 'each'][0]
+        dialog.preset.setCurrentIndex(preset_index)
+        dialog.flair_filter.setText('FICTION')
+        dialog.try_accept()
+        made = dialog.result_follow()
+        self.assertEqual((made['layout'], made['flair_filter'], made['source']['subreddit']), ('each', 'FICTION', 'gayincest_stories'))
+        edit = self.ui.FollowDialog(None, made)
+        self.assertEqual((edit.layout_box.currentData(), edit.flair_filter.text()), ('each', 'FICTION'))
+
+        class FeedFake:
+            posts = []
+
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                return feed(*FeedFake.posts)
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        db = action.gui.db
+        follow = core.new_follow('Stories', 'r/gayincest_stories', layout='each')
+        self.config.prefs['follows'] = [follow]
+        FeedFake.posts = [entry('c', 'Weekend away, Part 2', '<p>two</p>'), entry('b', 'Camping [16M] and [40M]', '<p>skipped</p>'),
+                          entry('a', 'Weekend away, Part 1', '<p>one</p>')]
+        action.check_now([follow])
+        titles = sorted((b['mi'].title, b['mi'].series, b['mi'].series_index) for b in db.books.values())
+        self.assertEqual(titles, [('Weekend away, Part 1', 'Weekend away', 1.0), ('Weekend away, Part 2', 'Weekend away', 2.0)])
+        self.assertTrue(all(b['formats'].get('EPUB') for b in db.books.values()))
+        writes = db.writes
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertEqual((len(db.books), db.writes), (2, writes), 'nothing is added twice')
+        FeedFake.posts.insert(0, entry('d', 'Another story', '<p>three</p>'))
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertEqual(len(db.books), 3)
+
     def test_manage_dialog_lists_and_removes_follows_and_their_cache(self):
         follow = self.core.new_follow('Series', 'u/writer', 'Chapter')
         self.config.prefs['follows'] = [follow]
