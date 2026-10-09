@@ -5,7 +5,7 @@ from qt.core import QAction, QMenu
 from calibre_plugins.nifty_downloader import core
 from calibre_plugins.nifty_downloader import libkit
 from calibre_plugins.nifty_downloader.guikit import run_task
-from calibre_plugins.nifty_downloader.ui import BrowseDialog, LinksDialog
+from calibre_plugins.nifty_downloader.ui import AuthorDialog, BrowseDialog, LinksDialog
 
 IDENTIFIER = 'nifty'
 
@@ -17,7 +17,8 @@ class NiftyAction(InterfaceAction):
     def genesis(self):
         menu = QMenu(self.gui)
         self.qaction.setMenu(menu)
-        for title, slot in [('Download stories by address…', self.download_by_link), ('Browse by category…', self.browse)]:
+        for title, slot in [('Download stories by address…', self.download_by_link), ('Browse by category…', self.browse),
+                            ('Browse by author…', self.browse_authors)]:
             action = QAction(title, self.gui)
             action.triggered.connect(slot)
             menu.addAction(action)
@@ -86,3 +87,44 @@ class NiftyAction(InterfaceAction):
         if task.cancelled():
             lines.append('Cancelled; books downloaded before that were kept.')
         info_dialog(self.gui, 'Nifty download complete', '\n'.join(lines + problems + failures + build_errors), show=True)
+
+    def browse_authors(self):
+        dialog = AuthorDialog(self.gui, self.existing_ids())
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        selection = dialog.selection()
+        if not selection:
+            return info_dialog(self.gui, 'Nifty', 'Nothing was ticked.', show=True)
+        self.download_selection(selection, dialog.skip.isChecked())
+
+    def download_selection(self, selection, skip):
+        """Download author selections: each item is one combined book or separate single books."""
+        count = sum(len(item['addresses']) for item in selection)
+        if count > 15 and not question_dialog(
+                self.gui, 'Nifty', f'Download {count} stories or series? Each chapter is a separate request (about one per second). '
+                                   'You can cancel and keep what was fetched.'):
+            return
+        skip_ids = self.existing_ids() if skip else set()
+        groups, stats, failures = [], {}, []
+
+        def work(task):
+            fetcher = core.Fetcher(cancelled=task.cancelled)
+            for group in core.iter_selection(fetcher, selection, skip_ids, lambda msg: setattr(task, 'status', msg), stats):
+                groups.append(group)  # kept even if a later item is cancelled
+
+        task = run_task(self.gui, 'Downloading stories…', work)
+        if task.error:
+            failures.append(str(task.error))
+        added, errors = 0, []
+        for group in groups:
+            combine = bool(group['title']) and len(group['stories']) >= 2
+            n, e = libkit.import_stories(self.gui, group['stories'], combine, group['title'] if combine else None,
+                                         core.build_epub, IDENTIFIER, core.PUBLISHER)
+            added += n
+            errors += e
+        lines = [f'{added} book(s) added.']
+        if stats.get('skipped'):
+            lines.append(f"{stats['skipped']} already in the library, skipped.")
+        if task.cancelled():
+            lines.append('Cancelled; books downloaded before that were kept.')
+        info_dialog(self.gui, 'Nifty download complete', '\n'.join(lines + stats.get('problems', []) + failures + errors), show=True)

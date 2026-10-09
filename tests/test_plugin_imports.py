@@ -79,6 +79,15 @@ class PluginImportTests(unittest.TestCase):
         two = libkit.metadata_for(group + [dict(group[0], id='b', title='U')], 'Omni', 'metabods', 'Metabods')
         self.assertEqual((two.title, two.ids), ('Omni', {}))
 
+    def test_library_metadata_carries_series_fields(self):
+        package = self.load('metabods_downloader')
+        libkit = importlib.import_module(package + '.libkit')
+        story = {'id': 'a', 'title': 'Part B', 'author': 'Au', 'tags': [], 'categories': [], 'series': 'My Series', 'series_index': 2.0}
+        mi = libkit.metadata_for([story], None, 'nifty', 'Nifty')
+        self.assertEqual((mi.series, mi.series_index), ('My Series', 2.0))
+        plain = libkit.metadata_for([{'id': 'b', 'title': 'Solo', 'author': 'Au', 'tags': [], 'categories': []}], None, 'nifty', 'Nifty')
+        self.assertFalse(hasattr(plain, 'series'), 'a story outside a series gets no series fields')
+
 
 if __name__ == '__main__':
     unittest.main()

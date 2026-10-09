@@ -4,9 +4,12 @@ Calibre itself is replaced by small stubs (its preferences store and plain modul
 behaviour, is real. This is what caught the 'finished task looks cancelled' bug that left the tag search empty.
 """
 import builtins
+import http.server
 import importlib
+import io
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import time
@@ -19,11 +22,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 try:
-    from PyQt6 import QtCore, QtWidgets
+    from PyQt6 import QtCore, QtGui, QtWidgets
     HAVE_QT = True
 except ImportError:  # also raised when system libraries such as libEGL are missing
     HAVE_QT = False
 import build_plugins  # noqa: E402
+sys.path.insert(0, str(ROOT / 'tests'))
+from reddit_samples import entry, feed  # noqa: E402
 
 TAG_INDEX = ('<p class="xy23R-sectionheaders">A</p>'
              '<a href="?list=tag&id=1">Alpha</a><a href="?list=tag&id=2">Beta</a><a href="?list=tag&id=90">All Tags</a>')
@@ -38,6 +43,14 @@ TAG_PAGES = {
     '1': story_row('one', 'Story One') + story_row('two', 'Story Two'),
     '2': story_row('two', 'Story Two') + story_row('three', 'Story Three'),
 }
+
+
+class StubMetadata:
+    def __init__(self, title, authors):
+        self.title, self.authors, self.ids, self.comments, self.tags = title, authors, {}, None, []
+
+    def set_identifier(self, key, value):
+        self.ids[key] = value
 
 
 class StubPrefs(dict):
@@ -84,13 +97,18 @@ class QtCase(unittest.TestCase):
     def setUp(self):
         self.saved = {k: v for k, v in sys.modules.items() if k.startswith(('calibre', 'qt', 'calibre_plugins'))}
         qtcore = types.ModuleType('qt.core')
-        for module in (QtWidgets, QtCore):
+        for module in (QtWidgets, QtGui, QtCore):
             for name in dir(module):
                 setattr(qtcore, name, getattr(module, name))
         sys.modules['qt'] = types.ModuleType('qt')
         sys.modules['qt.core'] = qtcore
         for name in ('calibre', 'calibre.customize', 'calibre.gui2', 'calibre.gui2.actions', 'calibre.utils'):
             sys.modules[name] = MagicMock()
+        for name in ('calibre.ebooks', 'calibre.ebooks.metadata', 'calibre.ebooks.metadata.book'):
+            sys.modules[name] = MagicMock()
+        base = types.ModuleType('calibre.ebooks.metadata.book.base')
+        base.Metadata = StubMetadata
+        sys.modules['calibre.ebooks.metadata.book.base'] = base
         config = types.ModuleType('calibre.utils.config')
         config.JSONConfig = lambda name: StubPrefs()
         sys.modules['calibre.utils.config'] = config
@@ -227,6 +245,512 @@ class OtherDialogTests(QtCase):
         dialog = ui.LinksDialog(None)
         dialog.text.setPlainText('https://www.nifty.org/nifty/gay/college/\n\n')
         self.assertEqual(dialog.lines(), ['https://www.nifty.org/nifty/gay/college/'])
+
+
+def _panel(anchor, name, *entries):
+    lis = '\n'.join(f'<li><a href="{href}">{title}</a>' for href, title in entries)
+    return (f'<div id="{anchor}" class="panel panel-default"><div class="panel-heading"><h4 class="panel-title">{name}</h4></div>'
+            f'<div class="panel-body"><ul>\n{lis}\n</ul></div></div>')
+
+
+AUTHORS_PAGE = (_panel('writer', 'Writer One',
+                       ('/nifty/gay/college/texas-tails/', 'Texas Tails'),
+                       ('/nifty/gay/highschool/jeremiah', 'Texas Tails: Jeremiah'),
+                       ('/nifty/gay/camping/standalone', 'Standalone'),
+                       ('/nifty/lesbian/beginnings/elsewhere', 'Elsewhere'))
+                + _panel('solo', 'Solo Author', ('/nifty/gay/camping/lone-wolf', 'Lone Wolf')))
+
+
+class AuthorsFakeFetcher(FakeFetcher):
+    ranges = {
+        'gay/college/texas-tails/texas-tails-1': 'Date: Mon, 5 Jan 2026 10:00:00 +0000\n\nTexas Tails chapter one',
+        'gay/college/texas-tails/texas-tails-2': 'the end of Texas Tails',
+        'gay/highschool/jeremiah': 'Subject: Texas Tails: Jeremiah\n\nJeremiah text',
+        'gay/camping/standalone': 'Subject: Standalone\n\nContinued from Texas Tails\n\nmore text',
+    }
+
+    def get(self, url):
+        if url.endswith('authors.html'):
+            return AUTHORS_PAGE
+        if url.endswith('prolific.html'):
+            return ''
+        if url.endswith('gay/college/texas-tails/'):
+            return ('<table><tr><td>3K</td><td>Oct 3 1999</td><td><a href="texas-tails-1">texas-tails-1</a></td></tr>'
+                    '<tr><td>3K</td><td>Oct 4 1999</td><td><a href="texas-tails-2">texas-tails-2</a></td></tr></table>')
+        raise IOError('unexpected url ' + url)
+
+    def get_range(self, url, length=3000, tail=False):
+        key = url.split('/nifty/', 1)[1]
+        if key not in self.ranges:
+            raise IOError('unexpected range url ' + url)
+        return self.ranges[key]
+
+
+class YesBox:
+    """Stands in for QMessageBox so the confirmation answers Yes without a modal dialog."""
+    StandardButton = QtWidgets.QMessageBox.StandardButton if HAVE_QT else None
+
+    @staticmethod
+    def question(*args, **kwargs):
+        return QtWidgets.QMessageBox.StandardButton.Yes
+
+
+@unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')
+class NiftyAuthorDialogTests(QtCase):
+    def make(self, existing=()):
+        package = self.load('nifty_downloader')
+        core = importlib.import_module(package + '.core')
+        core.Fetcher = AuthorsFakeFetcher
+        ui = importlib.import_module(package + '.ui')
+        return ui.AuthorDialog(None, existing_ids=set(existing)), core
+
+    def titles(self, dialog):
+        out = []
+        for i in range(dialog.tree.topLevelItemCount()):
+            parent = dialog.tree.topLevelItem(i)
+            out.append((parent.text(0), [parent.child(j).text(0) for j in range(parent.childCount())]))
+        return out
+
+    def test_authors_list_filter_and_section(self):
+        dialog, _ = self.make()
+        self.assertEqual([dialog.author_list.item(i).text() for i in range(dialog.author_list.count())], ['Solo Author (1)', 'Writer One (3)'])
+        dialog.filter.setText('writer')
+        self.assertEqual(dialog.author_list.count(), 1)
+        dialog.filter.setText('')
+        dialog.section.setCurrentText('lesbian')
+        self.assertEqual([dialog.author_list.item(i).text() for i in range(dialog.author_list.count())], ['Writer One (1)'])
+
+    def test_suggested_set_spans_folders_and_selection_matches(self):
+        dialog, core = self.make(existing={'gay/highschool/jeremiah'})
+        dialog.filter.setText('writer')
+        dialog.author_list.setCurrentRow(0)
+        tree = self.titles(dialog)
+        self.assertEqual(len(tree), 2)
+        self.assertIn('Suggested set: Texas Tails', tree[0][0])
+        self.assertIn('2 folder(s)', tree[0][0])
+        self.assertEqual(len(tree[0][1]), 2)
+        self.assertTrue(any('Jeremiah' in c and 'already in library' in c for c in tree[0][1]))
+        self.assertTrue(tree[1][0].startswith('Other stories (1)'))
+        self.assertEqual(dialog.selection(), [], 'nothing is ticked at first')
+
+        dialog.check_suggested()
+        parent = dialog.tree.topLevelItem(0)
+        self.assertEqual([parent.child(i).checkState(0) for i in range(2)], [QtCore.Qt.CheckState.Checked] * 2, 'ticking a set ticks its stories')
+        selection = dialog.selection()
+        self.assertEqual([i['title'] for i in selection], ['Texas Tails'])
+        self.assertEqual(selection[0]['addresses'], [core.SITE + 'gay/college/texas-tails/', core.SITE + 'gay/highschool/jeremiah'])
+
+        parent.child(1).setCheckState(0, QtCore.Qt.CheckState.Unchecked)
+        self.assertEqual(parent.checkState(0), QtCore.Qt.CheckState.PartiallyChecked)
+        self.assertEqual(dialog.selection(), [{'title': None, 'addresses': [core.SITE + 'gay/college/texas-tails/']}], 'one story left is just a story')
+
+    def test_options_change_the_result(self):
+        dialog, core = self.make()
+        dialog.filter.setText('writer')
+        dialog.author_list.setCurrentRow(0)
+        dialog.check_all(True)
+        self.assertEqual([i['title'] for i in dialog.selection()], ['Texas Tails', None])
+        dialog.how.setCurrentIndex(2)  # separate books
+        self.assertEqual([i['title'] for i in dialog.selection()], [None, None, None])
+        dialog.how.setCurrentIndex(1)  # separate books grouped as a Calibre series
+        series_items = dialog.selection()
+        self.assertEqual([(i['title'], i.get('series')) for i in series_items[:1]], [(None, 'Texas Tails')])
+        dialog.how.setCurrentIndex(0)
+        dialog.combine_all.setChecked(True)
+        dialog.combine_title.setText('Everything by Writer')
+        selection = dialog.selection()
+        self.assertEqual((len(selection), selection[0]['title'], len(selection[0]['addresses'])), (1, 'Everything by Writer', 3))
+
+    def test_scanning_contents_finds_a_set_the_titles_missed_and_keeps_ticks(self):
+        dialog, core = self.make()
+        ui = sys.modules[type(dialog).__module__]
+        ui.QMessageBox = YesBox
+        dialog.filter.setText('writer')
+        dialog.author_list.setCurrentRow(0)
+        names = lambda: [(dialog.tree.topLevelItem(i).text(0), dialog.tree.topLevelItem(i).childCount()) for i in range(dialog.tree.topLevelItemCount())]
+        before = names()
+        self.assertEqual(before[0][1], 2, 'titles alone: Texas Tails and Texas Tails: Jeremiah')
+        other = dialog.tree.topLevelItem(1)
+        other.child(0).setCheckState(0, QtCore.Qt.CheckState.Checked)  # tick "Standalone" before scanning
+
+        dialog.scan_contents()
+        after = names()
+        self.assertEqual(after[0][1], 3, 'the text of Standalone says it continues Texas Tails, so it joins the set')
+        self.assertEqual(len(after), 1, 'nothing is left over, so there is no "Other stories" group')
+        parent = dialog.tree.topLevelItem(0)
+        self.assertIn('Found in the stories', parent.toolTip(0))
+        self.assertIn('Standalone says', parent.toolTip(0))
+        ticked = [parent.child(i).text(0) for i in range(parent.childCount()) if parent.child(i).checkState(0) == QtCore.Qt.CheckState.Checked]
+        self.assertEqual(len(ticked), 1)
+        self.assertIn('Standalone', ticked[0], 'the story ticked before the scan is still ticked')
+        self.assertEqual(sorted(dialog.texts), sorted(['gay/college/texas-tails', 'gay/highschool/jeremiah', 'gay/camping/standalone']))
+        self.assertIn('contents of 3 read', dialog.summary.text())
+        # reading again finds nothing new to fetch
+        dialog.scan_contents()
+        self.assertIn('already been read', dialog.summary.text())
+
+
+class RecordingBox:
+    """Stands in for QMessageBox: answers Yes to questions and records warnings."""
+    StandardButton = QtWidgets.QMessageBox.StandardButton if HAVE_QT else None
+    warnings = []
+
+    @staticmethod
+    def question(*args, **kwargs):
+        return QtWidgets.QMessageBox.StandardButton.Yes
+
+    @staticmethod
+    def warning(*args, **kwargs):
+        RecordingBox.warnings.append(args[2] if len(args) > 2 else '')
+
+
+class FakeDb:
+    """The part of Calibre's library API the plugin uses, keeping books in memory."""
+
+    def __init__(self):
+        self.books, self.next_id, self.writes = {}, 1, 0
+
+    def all_book_ids(self):
+        return set(self.books)
+
+    def all_field_for(self, field, ids, default=None):
+        return {i: dict(self.books[i]['mi'].ids) for i in ids}
+
+    def add_books(self, items, **kwargs):
+        ids = []
+        for mi, formats in items:
+            self.books[self.next_id] = {'mi': mi, 'formats': {k: v.read() for k, v in formats.items()}}
+            ids.append(self.next_id)
+            self.next_id += 1
+            self.writes += 1
+        return ids, []
+
+    def add_format(self, book_id, fmt, stream, replace=True):
+        self.books[book_id]['formats'][fmt] = stream.read()
+        self.writes += 1
+        return True
+
+    def set_field(self, name, mapping):
+        for book_id, value in mapping.items():
+            setattr(self.books[book_id]['mi'], name, value)
+
+
+def make_gui():
+    gui = QtWidgets.QWidget()
+    gui.db = FakeDb()
+    gui.current_db = MagicMock()
+    gui.current_db.new_api = gui.db
+    gui.library_view, gui.tags_view, gui.status_bar = MagicMock(), MagicMock(), MagicMock()
+    return gui
+
+
+@unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')
+class RedditPluginTests(QtCase):
+    def setUp(self):
+        super().setUp()
+        RecordingBox.warnings = []
+        sys.modules['calibre.gui2.actions'].InterfaceAction = object
+        self.package = self.load('reddit_follower')
+        self.core = importlib.import_module(self.package + '.core')
+        self.config = importlib.import_module(self.package + '.config')
+        self.ui = importlib.import_module(self.package + '.ui')
+        self.ui.QMessageBox = RecordingBox
+
+    def make_action(self):
+        action_module = importlib.import_module(self.package + '.action')
+        action = action_module.FollowerAction()
+        action.gui = make_gui()
+        action.qaction = MagicMock()
+        action.genesis()
+        action.poll_timer.setInterval(30)
+        self.tmp_cache = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_cache.cleanup)
+        action._cache_dir = self.tmp_cache.name
+        return action
+
+    # -- dialogs
+    def test_follow_dialog_validates_and_keeps_identity_when_edited(self):
+        dialog = self.ui.FollowDialog(None)
+        dialog.source.setText('hello world')
+        self.assertIn('Could not tell', dialog.message.text())
+        dialog.try_accept()
+        self.assertEqual(dialog.result(), 0, 'an unusable address does not close the dialog')
+        dialog.name.setText('Out of Cruel Space')
+        dialog.source.setText('https://www.reddit.com/r/HFY/search/?q=Out+of+Cruel+Space&restrict_sr=1')
+        dialog.title_filter.setText('Out of Cruel Space')
+        self.assertIn('Will follow search', dialog.message.text())
+        dialog.try_accept()
+        self.assertEqual(dialog.result(), 1)
+        follow = dialog.result_follow()
+        self.assertEqual((follow['name'], follow['source']['kind'], follow['title_filter']), ('Out of Cruel Space', 'search', 'Out of Cruel Space'))
+        follow['last_checked'] = 123.0
+        edit = self.ui.FollowDialog(None, follow)
+        edit.author_filter.setText('/u/Writer')
+        edited = edit.result_follow()
+        self.assertEqual((edited['id'], edited['author_filter'], edited['last_checked']), (follow['id'], 'Writer', 0.0), 'same series, checked again')
+
+    def test_quick_start_preset_fills_the_dialog_for_out_of_cruel_space(self):
+        dialog = self.ui.FollowDialog(None)
+        self.assertEqual(dialog.preset.count(), 1 + len(self.core.PRESETS))
+        dialog.preset.setCurrentIndex(1)
+        self.assertEqual((dialog.name.text(), dialog.source.text(), dialog.title_filter.text(), dialog.author_filter.text()),
+                         ('Out of Cruel Space', 'u/KyleKKent', 'Out of Cruel Space', 'KyleKKent'))
+        self.assertIn('Will follow u/KyleKKent', dialog.message.text())
+        dialog.try_accept()
+        self.assertEqual(dialog.result(), 1)
+        follow = dialog.result_follow()
+        self.assertEqual((follow['name'], follow['source']['user'], follow['author_filter']), ('Out of Cruel Space', 'KyleKKent', 'KyleKKent'))
+        edit = self.ui.FollowDialog(None, follow)
+        self.assertFalse(hasattr(edit, 'preset'), 'editing an existing follow offers no presets')
+
+    def test_settings_dialog_requires_a_client_id_for_the_api_and_clamps_the_interval(self):
+        dialog = self.ui.SettingsDialog(None)
+        dialog.api.setChecked(True)
+        dialog.save()
+        self.assertEqual(self.config.prefs['mode'], 'rss', 'nothing is saved without a client id')
+        self.assertEqual(len(RecordingBox.warnings), 1)
+        dialog.client_id.setText(' abc123 ')
+        dialog.username.setText('Reader')
+        dialog.hours.setValue(0.1)
+        dialog.save()
+        prefs = self.config.prefs
+        self.assertEqual((prefs['mode'], prefs['client_id'], prefs['username']), ('api', 'abc123', 'Reader'))
+        self.assertGreaterEqual(prefs['check_hours'], 1.0, 'never faster than hourly')
+
+    def test_settings_dialog_logs_in_and_out_with_a_simulated_browser(self):
+        import threading
+        import urllib.request
+        from urllib.parse import parse_qs, urlparse
+        login = importlib.import_module(self.package + '.login')
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import test_reddit_login as stand
+        stand.StandIn.log, stand.StandIn.token_reply = [], None
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), stand.StandIn)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        base = f'http://127.0.0.1:{server.server_address[1]}'
+        dialog = self.ui.SettingsDialog(None)
+        self.assertEqual(dialog.login_status.text(), 'Not logged in')
+        self.assertFalse(dialog.logout_button.isEnabled())
+        dialog.api.setChecked(True)
+        dialog.client_id.setText('test-client-id')
+        dialog.login_endpoints = {'token_url': base + '/token', 'base': base, 'revoke_url': base + '/revoke'}
+        dialog.login_endpoints['redirect_uri'] = login.REDIRECT_URI
+
+        def browser(url):
+            state = parse_qs(urlparse(url).query)['state'][0]
+            threading.Thread(target=lambda: urllib.request.urlopen(f'{login.REDIRECT_URI}?code=abc&state={state}').read()).start()
+        dialog.open_browser = browser
+        dialog.log_in()
+        self.assertEqual(RecordingBox.warnings, [])
+        self.assertEqual(dialog.login_status.text(), 'Logged in as u/Reader')
+        self.assertEqual((self.config.prefs['refresh_token'], self.config.prefs['account_name']), ('refresh1', 'Reader'))
+        dialog.log_out()
+        self.assertEqual(self.config.prefs['refresh_token'], '')
+        self.assertEqual(dialog.login_status.text(), 'Not logged in')
+        self.assertTrue(any(path == '/revoke' for path, _, _ in stand.StandIn.log))
+
+    def test_manage_dialog_lists_and_removes_follows_and_their_cache(self):
+        follow = self.core.new_follow('Series', 'u/writer', 'Chapter')
+        self.config.prefs['follows'] = [follow]
+        cache_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(cache_dir, ignore_errors=True))
+        cache = self.core.ChapterCache(cache_dir, follow['id'])
+        cache.posts['t3_a'] = {'id': 't3_a', 'title': 'Chapter 1', 'author': 'writer', 'created': 1.0, 'link': '', 'html': '<p>x</p>'}
+        cache.save()
+
+        class Act:
+            def chapter_count(self, f):
+                return len(self.core.ChapterCache(cache_dir, f['id']).posts)
+
+            def cache_dir(self):
+                return cache_dir
+        act = Act()
+        act.core = self.core
+        dialog = self.ui.ManageDialog(None, act)
+        self.assertEqual(dialog.table.rowCount(), 1)
+        self.assertEqual([dialog.table.item(0, c).text() for c in (0, 2, 3)], ['Series', '1', 'never'])
+        self.assertIn('u/writer', dialog.table.item(0, 1).text())
+        self.assertIn('Chapter', dialog.table.item(0, 1).text())
+        dialog.table.selectRow(0)
+        dialog.remove()
+        self.assertEqual(dialog.table.rowCount(), 0)
+        self.assertEqual(self.config.prefs['follows'], [])
+        self.assertFalse(Path(cache.path).exists(), 'the cached chapters go with the follow')
+
+    def test_settings_test_button_uses_the_values_on_screen_and_saves_nothing(self):
+        core = self.core
+        seen = []
+
+        class FeedFake:
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                seen.append(url)
+                if FeedFake.limited:
+                    raise core.RateLimited(url, 300)
+                return feed(entry('a1', 'Chapter 1', '<p>One.</p>'), entry('a2', 'Chapter 2', '<p>Two.</p>'))
+            limited = False
+        core.Fetcher = FeedFake
+        before = dict(self.config.prefs)
+        dialog = self.ui.SettingsDialog(None)
+        dialog.test_connection()
+        self.assertTrue(dialog.test_result.text().startswith('OK: Reddit answered through the public feed: 2 post(s)'), dialog.test_result.text())
+        self.assertEqual(len(seen), 1)
+        self.assertIn('/r/HFY/new.rss', seen[0])
+        FeedFake.limited = True
+        dialog.test_connection()
+        self.assertTrue(dialog.test_result.text().startswith('Problem: Reddit asked us to slow down'), dialog.test_result.text())
+        dialog.api.setChecked(True)  # no client id typed: the test says so instead of crashing
+        dialog.test_connection()
+        self.assertIn('client id', dialog.test_result.text())
+        self.assertEqual(dict(self.config.prefs), before, 'testing must not change saved settings')
+
+    def test_test_selected_reports_how_many_posts_match_the_follow(self):
+        core = self.core
+        page = feed(self.chapter(2), self.chapter(1), entry('zz', 'Unrelated', '<p>no</p>'))
+
+        class FeedFake:
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                return page
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        follow = core.new_follow('Out of Cruel Space', 'r/HFY', 'Out of Cruel Space')
+        self.config.prefs['follows'] = [follow]
+        action_module = importlib.import_module(self.package + '.action')
+        action_module.info_dialog.reset_mock()
+        dialog = self.ui.ManageDialog(None, action)
+        dialog.table.selectRow(0)
+        dialog.test_selected()
+        title, text = action_module.info_dialog.call_args[0][1], action_module.info_dialog.call_args[0][2]
+        self.assertIn('Out of Cruel Space', title)
+        self.assertIn('3 post(s)', text)
+        self.assertIn('2 match your filters', text)
+        self.assertEqual(self.config.prefs['follows'][0]['last_checked'], 0.0, 'a test is not a check')
+        self.assertEqual(action.gui.db.books, {}, 'a test never touches the library')
+
+    # -- the whole life of a followed series, against a stand-in library and feed
+    def chapter(self, n, body=None):
+        return entry(f'c{n}', f'Out of Cruel Space (Chapter {n})', body or f'<p>Chapter {n} text.</p>', author='/u/Writer',
+                     stamp=f'2026-10-{n:02d}T10:00:00+00:00')
+
+    def test_follow_creates_updates_and_survives_rate_limits(self):
+        core = self.core
+
+        class FeedFake:
+            posts, limited = [], False
+
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                if FeedFake.limited:
+                    raise core.RateLimited(url, 77)
+                return feed(*FeedFake.posts)
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        db = action.gui.db
+        follow = core.new_follow('Out of Cruel Space', 'r/HFY', 'Out of Cruel Space')
+        self.config.prefs['follows'] = [follow]
+        FeedFake.posts = [self.chapter(3), self.chapter(2), entry('zz', 'Some unrelated story', '<p>no</p>'), self.chapter(1)]
+
+        def epub_chapters(book_id):
+            z = zipfile.ZipFile(io.BytesIO(db.books[book_id]['formats']['EPUB']))
+            return sorted(n for n in z.namelist() if n.startswith('OEBPS/s001_'))
+
+        action.check_now([follow])
+        self.assertEqual(len(db.books), 1, 'the book was created')
+        book_id = next(iter(db.books))
+        mi = db.books[book_id]['mi']
+        self.assertEqual((mi.title, mi.authors, mi.ids), ('Out of Cruel Space', ['Writer'], {'redditfollow': 'reddit-' + follow['id']}))
+        self.assertEqual(len(epub_chapters(book_id)), 3, 'three matching chapters, the unrelated post left out')
+        self.assertEqual(self.config.prefs['follows'][0]['last_status'], '3 new chapter(s)')
+        self.assertGreater(self.config.prefs['follows'][0]['last_checked'], 0)
+
+        # a new chapter arrives: the same book is updated in place
+        FeedFake.posts.insert(0, self.chapter(4))
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertEqual(len(db.books), 1)
+        self.assertEqual(len(epub_chapters(book_id)), 4)
+
+        # nothing new: the book is left alone
+        writes = db.writes
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertEqual(db.writes, writes)
+
+        # the user deleted the book: the next check brings it back from the cached chapters
+        del db.books[book_id]
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertEqual(len(db.books), 1)
+        self.assertEqual(len(epub_chapters(next(iter(db.books)))), 4)
+
+        # Reddit says slow down: stop, remember, and leave the library alone
+        FeedFake.limited = True
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertGreater(action.backoff_until, time.time() + 14 * 60, 'at least a quarter of an hour of peace')
+        self.assertIn('slow down', self.config.prefs['follows'][0]['last_status'])
+        self.assertEqual(len(db.books), 1)
+
+    def test_automatic_check_runs_in_the_background_and_respects_the_schedule(self):
+        core = self.core
+
+        class FeedFake:
+            posts = []
+            calls = 0
+
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                FeedFake.calls += 1
+                return feed(*FeedFake.posts)
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        follow = core.new_follow('Out of Cruel Space', 'r/HFY', 'Out of Cruel Space')
+        self.config.prefs['follows'] = [follow]
+        FeedFake.posts = [self.chapter(2), self.chapter(1)]
+
+        def wait():
+            deadline = time.time() + 15
+            while action.busy and time.time() < deadline:
+                QtWidgets.QApplication.processEvents()
+                time.sleep(0.02)
+            QtWidgets.QApplication.processEvents()
+            self.assertFalse(action.busy, 'the background check should finish')
+
+        self.config.prefs['auto_check'] = False
+        action.auto_check()
+        self.assertFalse(action.busy, 'automatic checking can be switched off')
+        self.assertEqual(FeedFake.calls, 0)
+
+        self.config.prefs['auto_check'] = True
+        action.auto_check()
+        self.assertTrue(action.busy)
+        wait()
+        self.assertEqual(len(action.gui.db.books), 1)
+        self.assertTrue(action.gui.status_bar.show_message.called, 'a quiet note in the status bar')
+        calls = FeedFake.calls
+        action.auto_check()
+        self.assertFalse(action.busy)
+        self.assertEqual(FeedFake.calls, calls, 'just checked, so not due again yet')
+
+        live = self.config.prefs['follows']
+        live[0]['last_checked'] = 1.0
+        self.config.prefs['follows'] = live
+        action.backoff_until = time.time() + 3600
+        action.auto_check()
+        self.assertFalse(action.busy, 'a recent rate limit holds automatic checks back')
+        action.backoff_until = 0
+        FeedFake.posts.insert(0, self.chapter(3))
+        action.auto_check()
+        wait()
+        book = next(iter(action.gui.db.books.values()))
+        z = zipfile.ZipFile(io.BytesIO(book['formats']['EPUB']))
+        self.assertEqual(len([n for n in z.namelist() if n.startswith('OEBPS/s001_')]), 3)
 
 
 @unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')

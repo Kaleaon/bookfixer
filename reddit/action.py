@@ -1,0 +1,180 @@
+import copy
+import os
+import threading
+import time
+
+from calibre.gui2 import error_dialog, info_dialog
+from calibre.gui2.actions import InterfaceAction
+from qt.core import QAction, QMenu, QTimer
+
+from calibre_plugins.reddit_follower import core, libkit
+from calibre_plugins.reddit_follower.config import prefs
+from calibre_plugins.reddit_follower.guikit import run_task
+from calibre_plugins.reddit_follower.ui import ManageDialog, SettingsDialog
+
+IDENTIFIER = 'redditfollow'
+TICK_MS = 15 * 60 * 1000       # how often we look at which stories are due; looking costs nothing
+FIRST_CHECK_MS = 2 * 60 * 1000  # after startup, so Calibre opens quickly
+MIN_BACKOFF = 15 * 60           # seconds to leave Reddit alone after it asks us to slow down
+
+
+class FollowerAction(InterfaceAction):
+    name = 'Reddit Story Follower'
+    action_spec = ('Reddit stories', None, 'Follow story series on Reddit as books that grow', None)
+
+    def genesis(self):
+        menu = QMenu(self.gui)
+        self.qaction.setMenu(menu)
+        for title, slot in (('Followed stories…', self.manage), ('Check for new chapters now', self.check_all_now), ('Settings…', self.settings)):
+            action = QAction(title, self.gui)
+            action.triggered.connect(slot)
+            menu.addAction(action)
+        self.qaction.triggered.connect(self.manage)
+        self.busy = False
+        self.backoff_until = 0.0
+        self.stopping = False
+        self._thread = None
+        self._job = {}
+        self._cache_dir = None
+        self.timer = QTimer(self.gui)
+        self.timer.timeout.connect(self.auto_check)
+        self.timer.start(TICK_MS)
+        QTimer.singleShot(FIRST_CHECK_MS, self.auto_check)
+        self.poll_timer = QTimer(self.gui)
+        self.poll_timer.setInterval(500)
+        self.poll_timer.timeout.connect(self._poll)
+
+    def shutting_down(self):
+        self.stopping = True  # a check in progress stops at the next page
+
+    # -- helpers
+    def cache_dir(self):
+        if self._cache_dir is None:
+            from calibre.constants import config_dir
+            self._cache_dir = os.path.join(config_dir, 'plugins', 'reddit_follower_cache')
+        return self._cache_dir
+
+    def chapter_count(self, follow):
+        return len(core.ChapterCache(self.cache_dir(), follow['id']).posts)
+
+    def make_source(self, cancelled):
+        return core.make_source(prefs['mode'], prefs['client_id'], prefs['client_secret'],
+                                 prefs['account_name'] or prefs['username'], cancelled, prefs['refresh_token'])
+
+    # -- entry points
+    def manage(self):
+        ManageDialog(self.gui, self).exec()
+
+    def settings(self):
+        SettingsDialog(self.gui).exec()
+
+    def check_all_now(self):
+        self.check_now(list(prefs['follows']))
+
+    def check_now(self, follows):
+        """Check the given follows while the user waits (with a Cancel button), then update the library."""
+        if not follows:
+            return info_dialog(self.gui, 'Reddit stories', 'Nothing is being followed yet. Use "Followed stories…" to add one.', show=True)
+        if self.busy:
+            return info_dialog(self.gui, 'Reddit stories', 'A check is already running in the background. Try again in a minute.', show=True)
+        copies = copy.deepcopy(follows)
+        try:
+            task = run_task(self.gui, 'Checking Reddit…', lambda t: core.run_follows(
+                self.make_source(t.cancelled), copies, self.cache_dir(), t.cancelled, lambda msg: setattr(t, 'status', msg)))
+        except core.SourceError as exc:
+            return error_dialog(self.gui, 'Reddit stories', str(exc), show=True)
+        if task.error:
+            return error_dialog(self.gui, 'Reddit stories', f'The check failed: {task.error}', show=True)
+        if task.result is None:
+            return
+        self.finish(task.result, interactive=True)
+
+    def test_follow(self, follow):
+        """One request for the first page of this follow, reported to the user. Changes nothing."""
+        task = run_task(self.gui, 'Testing…', lambda t: core.probe(self.make_source(t.cancelled), follow['source'], follow))
+        if task.error:
+            return error_dialog(self.gui, 'Reddit stories', f'The test failed: {task.error}', show=True)
+        if task.result is not None:
+            info_dialog(self.gui, f"Test: {follow['name']}", task.result[1], show=True)
+
+    # -- automatic checks (quiet, in a background thread)
+    def auto_check(self):
+        if self.stopping or self.busy or not prefs['auto_check'] or time.time() < self.backoff_until:
+            return
+        hours = float(prefs['check_hours'])
+        due = [f for f in prefs['follows'] if core.due(f, hours)]
+        if not due:
+            return
+        copies = copy.deepcopy(due)
+        self.busy = True
+        self._job = {'results': None, 'error': None}
+
+        def work():
+            try:
+                self._job['results'] = core.run_follows(self.make_source(lambda: self.stopping), copies, self.cache_dir(), lambda: self.stopping)
+            except Exception as exc:  # reported quietly in the status bar
+                self._job['error'] = exc
+
+        self._thread = threading.Thread(target=work, daemon=True)
+        self._thread.start()
+        self.poll_timer.start()
+
+    def _poll(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self.poll_timer.stop()
+        self.busy = False
+        job, self._job = self._job, {}
+        if job.get('results'):
+            self.finish(job['results'], interactive=False)
+        elif job.get('error') and not isinstance(job['error'], core.Cancelled):
+            self.gui.status_bar.show_message(f"Reddit stories: check failed ({job['error']})", 10000)
+
+    # -- applying results
+    def finish(self, results, interactive):
+        by_id = {f['id']: f for f in prefs['follows']}
+        for r in results:
+            live = by_id.get(r['follow']['id'])
+            if live is not None and not r['skipped']:
+                live['last_checked'] = r['follow'].get('last_checked', live.get('last_checked', 0.0))
+                live['last_status'] = r['follow'].get('last_status', '')
+        prefs['follows'] = list(prefs['follows'])  # assigning saves the settings
+        if any(r['rate_limited'] for r in results):
+            wait = max([r['retry_after'] or 0 for r in results] + [MIN_BACKOFF])
+            self.backoff_until = time.time() + wait
+        lines, changed_books = [], 0
+        for r in results:
+            name = r['follow']['name']
+            if r['skipped']:
+                lines.append(f'{name}: skipped (Reddit asked us to slow down)')
+                continue
+            if r['rate_limited']:
+                lines.append(f"{name}: Reddit asked us to slow down; stopped. Will try again after about {max(r['retry_after'] or 0, MIN_BACKOFF) // 60} minutes.")
+            elif r['error']:
+                lines.append(f"{name}: {r['error']}")
+            outcome = self.update_library(r['follow'], r['new'] or r['changed'])
+            if outcome:
+                lines.append(f"{name}: {outcome}")
+                changed_books += 1
+            elif not r['error'] and not r['rate_limited']:
+                lines.append(f'{name}: up to date')
+        if interactive:
+            info_dialog(self.gui, 'Reddit stories', '\n'.join(lines) or 'Nothing to report.', show=True)
+        elif changed_books:
+            self.gui.status_bar.show_message('Reddit stories updated: ' + '; '.join(l for l in lines if 'up to date' not in l), 15000)
+
+    def update_library(self, follow, has_changes):
+        """Rebuild the book from the cached chapters when something changed or the book is missing. Returns a message or ''."""
+        cache = core.ChapterCache(self.cache_dir(), follow['id'])
+        if not cache.posts:
+            return ''
+        story = core.build_story(follow, cache)
+        if not has_changes and libkit.find_book(self.gui, IDENTIFIER, story['id']) is not None:
+            return ''
+        try:
+            mi = libkit.metadata_for([story], None, IDENTIFIER, core.PUBLISHER)
+            _, created = libkit.upsert_epub(self.gui, mi, core.build_epub(story), IDENTIFIER, story['id'])
+        except Exception as exc:
+            return f'could not update the book ({exc})'
+        count = len(story['sections'])
+        return f'added to your library with {count} chapter(s)' if created else f'book updated, now {count} chapter(s)'
