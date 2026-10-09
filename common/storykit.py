@@ -62,6 +62,9 @@ class Fetcher:
                     return decode(raw, resp.headers.get_content_charset())
             except HTTPError as exc:
                 last_error = exc
+                hint = exc.headers.get('WWW-Authenticate') if exc.headers else None
+                if hint:  # servers that refuse a login often say why here (e.g. Reddit: insufficient_scope)
+                    last_error = f'{exc} ({hint})'
                 if exc.code == 429:  # never retry into a rate limit; report it and let the caller back off
                     try:
                         retry_after = int(exc.headers.get('Retry-After', '')) if exc.headers else None

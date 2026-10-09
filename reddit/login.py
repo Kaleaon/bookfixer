@@ -20,7 +20,7 @@ AUTHORIZE_URL = 'https://www.reddit.com/api/v1/authorize'
 TOKEN_URL = 'https://www.reddit.com/api/v1/access_token'
 REVOKE_URL = 'https://www.reddit.com/api/v1/revoke_token'
 OAUTH = 'https://oauth.reddit.com'
-SCOPES = 'read identity'
+SCOPES = 'read identity history'  # history is what Reddit requires for a user's list of submitted posts
 LOGIN_USER_AGENT = 'calibre:reddit-follower:1.0 (login)'
 
 

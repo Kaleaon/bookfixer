@@ -84,7 +84,7 @@ class LoginTests(unittest.TestCase):
     def test_authorize_url_asks_for_a_permanent_read_only_login(self):
         query = {k: v[0] for k, v in parse_qs(urlparse(login.authorize_url('abc', 'st8')).query).items()}
         self.assertEqual((query['client_id'], query['state'], query['duration'], query['scope'], query['redirect_uri']),
-                         ('abc', 'st8', 'permanent', 'read identity', 'http://127.0.0.1:8844/callback'))
+                         ('abc', 'st8', 'permanent', 'read identity history', 'http://127.0.0.1:8844/callback'))
         self.assertTrue(login.authorize_url('abc', 's').startswith('https://www.reddit.com/api/v1/authorize?'))
 
     def test_full_login_returns_refresh_token_and_name(self):

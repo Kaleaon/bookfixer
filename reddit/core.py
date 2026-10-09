@@ -290,7 +290,13 @@ class ApiSource:
     def page(self, src, after=None, limit=100):
         if not self._token or time.monotonic() >= self._expires:
             self._authorize()
-        text = self.fetcher.get(self.base + api_path(src, limit, after), headers={'Authorization': f'bearer {self._token}', 'User-Agent': self.user_agent})
+        try:
+            text = self.fetcher.get(self.base + api_path(src, limit, after), headers={'Authorization': f'bearer {self._token}', 'User-Agent': self.user_agent})
+        except IOError as exc:
+            if 'HTTP Error 403' in str(exc) and 'insufficient_scope' in str(exc) and self.refresh_token:
+                raise SourceError('Reddit says the saved login lacks permission for this page. Open Settings, Log out, then Log in with '
+                                  'Reddit again to grant it.') from exc
+            raise
         return parse_listing(text)
 
 
