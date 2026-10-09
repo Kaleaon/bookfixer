@@ -1001,6 +1001,7 @@ class GeminiDialogTests(QtCase):
         finally:
             QtWidgets.QDialog.exec = original_exec
 
+
         T = QtCore.Qt.CheckState
         rows = {r[0]: r[1] for r in seen['rows']}  # books are asked about grouped by author, so the order is not the library's
         self.assertEqual(set(rows), {'dune messiah [epub]', 'Cooking Today'})
@@ -1022,6 +1023,31 @@ class GeminiDialogTests(QtCase):
         self.assertEqual(restored['tags'], ('Sci-Fi',))
         self.assertEqual(restored['languages'], ())
         self.assertEqual(dict(action_mod.prefs['undo']), {}, 'a clean undo clears the saved run')
+
+    def test_api_key_is_saved_when_the_window_closes_without_checking(self):
+        package = self.load('gemini_library_fixer')
+        sys.modules['calibre.gui2.actions'].InterfaceAction = object
+        action_mod = importlib.import_module(package + '.action')
+        gui = QtWidgets.QWidget()
+        gui.current_db = MagicMock(new_api=GeminiDb())
+        gui.library_view = MagicMock()
+        gui.library_view.get_selected_ids.return_value = [1]
+        action = action_mod.GeminiFixerAction()
+        action.gui = gui
+        action_mod.prefs['api_key'] = ''
+
+        def drive(dialog):
+            edit = next(e for e in dialog.findChildren(QtWidgets.QLineEdit) if e.echoMode() == QtWidgets.QLineEdit.EchoMode.Password)
+            edit.setText('  my-secret-key  ')
+            dialog.reject()  # closed without pressing Check books
+
+        original_exec = QtWidgets.QDialog.exec
+        QtWidgets.QDialog.exec = drive
+        try:
+            action.show_dialog()
+        finally:
+            QtWidgets.QDialog.exec = original_exec
+        self.assertEqual(action_mod.prefs['api_key'], 'my-secret-key')
 
 
 @unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')

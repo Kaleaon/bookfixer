@@ -214,6 +214,7 @@ class GeminiFixerAction(InterfaceAction):
             prefs['batch_size'] = batch.value()
 
         def do_list_models():
+            save_prefs()
             if not api_key():
                 return error_dialog(dialog, 'Gemini', 'Enter your API key first.', show=True)
             task = run_task(dialog, 'Asking Google for the model list…', lambda t: engine.list_models(api_key(), cancelled=t.cancelled))
@@ -304,6 +305,8 @@ class GeminiFixerAction(InterfaceAction):
             text = f'Restored {len(done)} book(s).' + ('\n\nProblems:\n' + '\n'.join(errors[:10]) if errors else '')
             info_dialog(self.gui, 'Gemini', text, show=True)
 
+        key.editingFinished.connect(save_prefs)  # the key is remembered as soon as it is typed, not only after a check
+        dialog.finished.connect(lambda _result: save_prefs())
         models_btn.clicked.connect(do_list_models)
         check_btn.clicked.connect(do_check)
         apply_btn.clicked.connect(do_apply)

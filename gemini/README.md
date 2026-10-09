@@ -29,7 +29,7 @@ You need a Google AI API key (free keys from [Google AI Studio](https://aistudio
 
 ## What is sent to Google
 
-Per book: title, authors, series, tags, publisher, language and file names. The first ~1500 characters of an EPUB are sent only if you tick that option. Nothing is sent until you press **Check books**. Your key is stored unencrypted in Calibre's settings folder and is sent only to Google, in a request header.
+Per book: title, authors, series, tags, publisher, language and file names. The first ~1500 characters of an EPUB are sent only if you tick that option. Nothing is sent until you press **Check books**. Your key is remembered in Calibre's settings (saved as soon as you type it and when the window closes, so you enter it once; stored unencrypted in the settings folder) and is sent only to Google, in a request header.
 
 Google's safety filter can refuse requests with adult content. When a batch is refused, the plugin splits it to find the book responsible and reports that book as "could not be checked"; the rest still work. It does not change Google's safety settings.
 
