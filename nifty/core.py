@@ -287,3 +287,192 @@ def download_ref(fetcher, ref, skip_ids=frozenset(), progress=lambda msg: None):
             continue
         stories.append(fetch_book(fetcher, resolved, progress))
     return stories, skipped
+
+
+# ---------------------------------------------------------------- authors directory: stories spread over many folders
+
+AUTHOR_PAGES = ('authors.html', 'prolific.html')  # the regular and the "prolific authors" directories
+_PANEL = re.compile(r'<div id="([^"]+)" class="panel panel-default">\s*<div class="panel-heading">\s*'
+                    r'<h4 class="panel-title">(.*?)</h4>.*?<ul>(.*?)</ul>', re.S)
+_ENTRY = re.compile(r'<li><a href="(/nifty/[^"]+)">(.*?)</a>', re.S)
+
+
+def norm_path(href):
+    """Archive path without the /nifty/ prefix, '.html' suffix or trailing slash, so one story has one key."""
+    path = href.split('#')[0].split('?')[0]
+    if path.startswith('/nifty/'):
+        path = path[len('/nifty/'):]
+    return re.sub(r'(?i)\.html?$', '', path.strip('/'))
+
+
+def parse_authors(page):
+    """[{'id', 'name', 'stories': [{'title', 'path', 'dir'}]}] from an authors directory page.
+    'dir' is true when the link names a folder (a multi-chapter story); duplicate links within an author are dropped."""
+    authors = []
+    for anchor, name, ul in _PANEL.findall(page):
+        seen, stories = set(), []
+        for href, title in _ENTRY.findall(ul):
+            path = norm_path(href)
+            title = html.unescape(strip_tags(title)).strip()
+            if path and path not in seen and title:
+                seen.add(path)
+                stories.append({'title': title, 'path': path, 'dir': href.split('#')[0].endswith('/')})
+        authors.append({'id': anchor, 'name': html.unescape(strip_tags(name)).strip(), 'stories': stories})
+    return authors
+
+
+def load_authors(fetcher, progress=lambda msg: None):
+    """Both directory pages merged by author id. Returns a list sorted by name."""
+    merged = {}
+    for page_name in AUTHOR_PAGES:
+        progress(f'Reading the authors directory ({page_name})')
+        for author in parse_authors(fetcher.get(SITE + page_name)):
+            existing = merged.setdefault(author['id'], {'id': author['id'], 'name': author['name'], 'stories': []})
+            have = {s['path'] for s in existing['stories']}
+            existing['stories'] += [s for s in author['stories'] if s['path'] not in have]
+    return sorted(merged.values(), key=lambda a: a['name'].casefold())
+
+
+def author_sections(author):
+    """Sections (gay, lesbian, ...) in which this author has stories."""
+    return sorted({s['path'].split('/')[0] for s in author['stories']})
+
+
+def story_folder(story):
+    parts = story['path'].split('/')
+    return '/'.join(parts[:2])
+
+
+_GENERIC = {'the', 'a', 'an', 'my', 'his', 'her', 'our', 'your', 'of', 'and', 'in', 'to', 'on', 'for', 'with', 'at',
+            'story', 'stories', 'tale', 'tales'}
+_NUMBERED = re.compile(r"[\s:,\-–(]*\b(?:(?:part|pt|chapter|ch|book|vol|volume|episode|ep)\.?\s*)?(?:\d+|[ivxlc]+)\)?\s*$", re.I)
+_VERSION = re.compile(r"\b(original|revised|revision|redux|rewrite|rewritten|edited|remaster(?:ed)?|new version|old version|"
+                      r"updated|alternate|reissue|v\d)\b", re.I)
+
+
+def _norm_title(title):
+    return re.sub(r'\s+', ' ', re.sub(r"[^a-z0-9' ]", ' ', title.lower())).strip()
+
+
+def _meaningful(base):
+    return len(base) >= 6 and any(w not in _GENERIC for w in base.split())
+
+
+def _split_title(title):
+    """(series name, kind) where kind is 'colon' for 'Series: Episode', 'number' for 'Series 3', else 'plain'."""
+    m = re.match(r'^(.{3,}?)\s*[:–—]\s+(.+)$', title)
+    if m:
+        return m.group(1).strip(), 'colon'
+    m = _NUMBERED.search(title)
+    if m and m.start() > 2:
+        return title[:m.start()].strip(' :-,'), 'number'
+    return title.strip(), 'plain'
+
+
+def suggest_series(stories):
+    """Suggest which of one author's stories belong together, even across folders.
+
+    Returns (series, rest). series is a list of {'name', 'reason', 'stories'} with 2+ stories each; rest is everything else.
+    Deliberately conservative and only a suggestion: it matches 'Series: Episode' titles, 'Series 2' / 'Series III' numbering,
+    and titles that are whole-word extensions of another of the author's titles ('Valley Boys' / 'Valley Boys Rugby Tour').
+    It does not match a shared opening phrase, which on Nifty is usually an author's habit ('Night with Mark' / 'Night with Mike').
+    Alternate versions of one story ('(Revised)', '[Original]', 'redux') are never treated as a series."""
+    stories = list(stories)
+    plain = {}
+    groups = {}
+    for s in stories:
+        base, kind = _split_title(s['title'])
+        key = _norm_title(base)
+        if kind == 'plain':
+            plain.setdefault(key, s)
+        elif _meaningful(key):
+            groups.setdefault((key, kind), (base, []))[1].append(s)
+    found = {}
+    for (key, kind), (base, members) in groups.items():
+        members = list(members)
+        if key in plain and plain[key] not in members:
+            members.insert(0, plain[key])  # the opening story is named exactly like the series
+        if len(members) >= 2 and key not in found:
+            found[key] = {'name': base, 'reason': 'title with "Series: Episode"' if kind == 'colon' else 'numbered titles',
+                          'stories': members}
+    titles = [(_norm_title(s['title']), s) for s in stories]
+    for key, s in titles:
+        if key in found or sum(1 for w in key.split() if w not in _GENERIC) < 2:
+            continue
+        extensions = [o for k, o in titles if k != key and k.startswith(key + ' ') and not _VERSION.search(o['title'])]
+        if extensions and not _VERSION.search(s['title']):
+            found[key] = {'name': s['title'], 'reason': 'titles that extend another title', 'stories': [s] + extensions}
+    series = []
+    for entry in found.values():
+        entry['stories'] = _order_series(entry['stories'])
+        if len(entry['stories']) >= 2 and not all(_VERSION.search(t['title']) for t in entry['stories'][1:]):
+            series.append(entry)
+    used = {id(s) for entry in series for s in entry['stories']}
+    series.sort(key=lambda e: e['name'].casefold())
+    return series, [s for s in stories if id(s) not in used]
+
+
+def _order_series(members):
+    def number(s):
+        m = re.search(r'(\d+)\s*$', s['title'])
+        return int(m.group(1)) if m else -1
+    seen, ordered = set(), []
+    for s in sorted(members, key=lambda s: (number(s), s['title'].casefold())):
+        if id(s) not in seen:
+            seen.add(id(s))
+            ordered.append(s)
+    return ordered
+
+
+def story_address(story):
+    """Address core.expand_targets understands for a directory-listed story."""
+    return url_for(story['path'] + ('/' if story.get('dir') else ''))
+
+
+def iter_selection(fetcher, selection, skip_ids=frozenset(), progress=lambda msg: None, stats=None):
+    """Download each selection item in turn, yielding {'title', 'stories'} as soon as it is done, so a cancel keeps
+    everything finished so far. stats collects 'skipped' (already in the library) and 'problems'.
+
+    selection: [{'title': book title or None, 'addresses': [...]}]. An item with a title and 2+ resulting stories is meant
+    to be one combined book; any other item gives one book per story."""
+    stats = stats if stats is not None else {}
+    stats.setdefault('skipped', 0)
+    stats.setdefault('problems', [])
+    for item in selection:
+        stories = []
+        try:
+            refs, errors = expand_targets(fetcher, item['addresses'], progress)
+            stats['problems'] += errors
+            for ref in refs:
+                got, skip = download_ref(fetcher, ref, skip_ids, progress)
+                stories += got
+                stats['skipped'] += skip
+        except IOError as exc:
+            stats['problems'].append(str(exc))
+        if stories:
+            yield {'title': item.get('title'), 'stories': stories}
+
+
+def download_selection(fetcher, selection, skip_ids=frozenset(), progress=lambda msg: None):
+    """All of iter_selection at once. Returns (groups, skipped, problems)."""
+    stats = {}
+    groups = list(iter_selection(fetcher, selection, skip_ids, progress, stats))
+    return groups, stats['skipped'], stats['problems']
+
+
+def build_selection(series_checked, singles, combine_series=True, combine_all_title=None):
+    """Turn what the user ticked into download_selection() input.
+
+    series_checked: [(series name, [stories])] with only the ticked stories; singles: ticked stories that are in no
+    suggested series. combine_all_title: if set, everything ticked becomes one book with that title."""
+    everything = [s for _, members in series_checked for s in members] + list(singles)
+    if combine_all_title and combine_all_title.strip():
+        return [{'title': combine_all_title.strip(), 'addresses': [story_address(s) for s in everything]}] if everything else []
+    selection = []
+    for name, members in series_checked:
+        if combine_series and len(members) >= 2:
+            selection.append({'title': name, 'addresses': [story_address(s) for s in members]})
+        else:
+            selection += [{'title': None, 'addresses': [story_address(s)]} for s in members]
+    selection += [{'title': None, 'addresses': [story_address(s)]} for s in singles]
+    return selection

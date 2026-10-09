@@ -229,6 +229,92 @@ class OtherDialogTests(QtCase):
         self.assertEqual(dialog.lines(), ['https://www.nifty.org/nifty/gay/college/'])
 
 
+def _panel(anchor, name, *entries):
+    lis = '\n'.join(f'<li><a href="{href}">{title}</a>' for href, title in entries)
+    return (f'<div id="{anchor}" class="panel panel-default"><div class="panel-heading"><h4 class="panel-title">{name}</h4></div>'
+            f'<div class="panel-body"><ul>\n{lis}\n</ul></div></div>')
+
+
+AUTHORS_PAGE = (_panel('writer', 'Writer One',
+                       ('/nifty/gay/college/texas-tails/', 'Texas Tails'),
+                       ('/nifty/gay/highschool/jeremiah', 'Texas Tails: Jeremiah'),
+                       ('/nifty/gay/camping/standalone', 'Standalone'),
+                       ('/nifty/lesbian/beginnings/elsewhere', 'Elsewhere'))
+                + _panel('solo', 'Solo Author', ('/nifty/gay/camping/lone-wolf', 'Lone Wolf')))
+
+
+class AuthorsFakeFetcher(FakeFetcher):
+    def get(self, url):
+        if url.endswith('authors.html'):
+            return AUTHORS_PAGE
+        if url.endswith('prolific.html'):
+            return ''
+        raise IOError('unexpected url ' + url)
+
+
+@unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')
+class NiftyAuthorDialogTests(QtCase):
+    def make(self, existing=()):
+        package = self.load('nifty_downloader')
+        core = importlib.import_module(package + '.core')
+        core.Fetcher = AuthorsFakeFetcher
+        ui = importlib.import_module(package + '.ui')
+        return ui.AuthorDialog(None, existing_ids=set(existing)), core
+
+    def titles(self, dialog):
+        out = []
+        for i in range(dialog.tree.topLevelItemCount()):
+            parent = dialog.tree.topLevelItem(i)
+            out.append((parent.text(0), [parent.child(j).text(0) for j in range(parent.childCount())]))
+        return out
+
+    def test_authors_list_filter_and_section(self):
+        dialog, _ = self.make()
+        self.assertEqual([dialog.author_list.item(i).text() for i in range(dialog.author_list.count())], ['Solo Author (1)', 'Writer One (3)'])
+        dialog.filter.setText('writer')
+        self.assertEqual(dialog.author_list.count(), 1)
+        dialog.filter.setText('')
+        dialog.section.setCurrentText('lesbian')
+        self.assertEqual([dialog.author_list.item(i).text() for i in range(dialog.author_list.count())], ['Writer One (1)'])
+
+    def test_suggested_set_spans_folders_and_selection_matches(self):
+        dialog, core = self.make(existing={'gay/highschool/jeremiah'})
+        dialog.filter.setText('writer')
+        dialog.author_list.setCurrentRow(0)
+        tree = self.titles(dialog)
+        self.assertEqual(len(tree), 2)
+        self.assertIn('Suggested set: Texas Tails', tree[0][0])
+        self.assertIn('2 folder(s)', tree[0][0])
+        self.assertEqual(len(tree[0][1]), 2)
+        self.assertTrue(any('Jeremiah' in c and 'already in library' in c for c in tree[0][1]))
+        self.assertTrue(tree[1][0].startswith('Other stories (1)'))
+        self.assertEqual(dialog.selection(), [], 'nothing is ticked at first')
+
+        dialog.check_suggested()
+        parent = dialog.tree.topLevelItem(0)
+        self.assertEqual([parent.child(i).checkState(0) for i in range(2)], [QtCore.Qt.CheckState.Checked] * 2, 'ticking a set ticks its stories')
+        selection = dialog.selection()
+        self.assertEqual([i['title'] for i in selection], ['Texas Tails'])
+        self.assertEqual(selection[0]['addresses'], [core.SITE + 'gay/college/texas-tails/', core.SITE + 'gay/highschool/jeremiah'])
+
+        parent.child(1).setCheckState(0, QtCore.Qt.CheckState.Unchecked)
+        self.assertEqual(parent.checkState(0), QtCore.Qt.CheckState.PartiallyChecked)
+        self.assertEqual(dialog.selection(), [{'title': None, 'addresses': [core.SITE + 'gay/college/texas-tails/']}], 'one story left is just a story')
+
+    def test_options_change_the_result(self):
+        dialog, core = self.make()
+        dialog.filter.setText('writer')
+        dialog.author_list.setCurrentRow(0)
+        dialog.check_all(True)
+        self.assertEqual([i['title'] for i in dialog.selection()], ['Texas Tails', None])
+        dialog.combine_series.setChecked(False)
+        self.assertEqual([i['title'] for i in dialog.selection()], [None, None, None])
+        dialog.combine_all.setChecked(True)
+        dialog.combine_title.setText('Everything by Writer')
+        selection = dialog.selection()
+        self.assertEqual((len(selection), selection[0]['title'], len(selection[0]['addresses'])), (1, 'Everything by Writer', 3))
+
+
 @unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')
 class FanficDialogTests(QtCase):
     @classmethod
