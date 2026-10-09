@@ -478,9 +478,7 @@ class ManageDialog(QDialog):
         self.table.setRowCount(len(follows))
         for r, follow in enumerate(follows):
             checked = time.strftime('%Y-%m-%d %H:%M', time.localtime(follow['last_checked'])) if follow.get('last_checked') else 'never'
-            filt = ''.join([f"  title has “{follow['title_filter']}”" if follow['title_filter'] else '',
-                            f"  by {follow['author_filter']}" if follow['author_filter'] else ''])
-            cells = [follow['name'], core.describe_source(follow['source']) + filt, str(self.action.chapter_count(follow)), checked, follow.get('last_status', '')]
+            cells = [follow['name'], core.describe_source(follow['source']) + core.describe_filters(follow), str(self.action.chapter_count(follow)), checked, follow.get('last_status', '')]
             for c, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 item.setData(Qt.ItemDataRole.UserRole, follow['id'])
