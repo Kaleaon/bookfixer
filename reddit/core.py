@@ -5,7 +5,9 @@ user's own credentials (recommended), or its public Atom feeds read the way a fe
 trade-offs). Requests are infrequent, one page at a time, and a rate limit (HTTP 429) ends the run instead of being retried.
 """
 import base64
+import csv
 import html
+import io
 import json
 import os
 import re
@@ -97,7 +99,9 @@ def describe_source(src):
 PRESETS = [
     {'label': 'Out of Cruel Space (r/HFY, by KyleKKent)', 'name': 'Out of Cruel Space', 'source': 'u/KyleKKent',
      # the author renamed the series part-way: "Out of Cruel Space, Part N" became "OOCS, Into A Wider Galaxy, Part N"
-     'title_filter': 're:^\\s*(Out of Cruel Space|OOCS)\\b.*\\d', 'author_filter': 'KyleKKent'},
+     'title_filter': 're:^\\s*(Out of Cruel Space|OOCS)\\b.*\\d', 'author_filter': 'KyleKKent',
+     # a fan-kept public chapter list (date, author, chapter, storyline) that names every chapter and fixes mistitled posts
+     'index_url': 'https://docs.google.com/spreadsheets/d/1IipEkkuMzpfhVlQh0BhOcrmHlguHBZhSKSLTwRhYDf8/edit?gid=1375133682'},
     # many authors, one story per post, each with a flair; every post becomes its own book (newest few on the first check)
     {'label': 'r/gayincest_stories (each post as its own book)', 'name': 'r/gayincest_stories', 'source': 'r/gayincest_stories',
      'title_filter': '', 'author_filter': '', 'flair_filter': '', 'layout': 'each'},
@@ -461,6 +465,108 @@ def preview_series(source, follow, pages=FIRST_RUN_PAGES, cancelled=lambda: Fals
             'titles': [p['title'] for p in ordered[:3]] + (['\u2026'] if len(ordered) > 6 else []) + [p['title'] for p in ordered[-3:]] if len(ordered) > 3 else [p['title'] for p in ordered]}
 
 
+# ---------------------------------------------------------------- chapter index (a public spreadsheet)
+
+INDEX_REFRESH_HOURS = 24
+_SHEET = re.compile(r'https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_\-]+)')
+_CHAPTER_LABEL = re.compile(r'(?i)\bchapter\s+(\d+)')
+
+
+def sheet_csv_url(url):
+    """The CSV export address for a public Google Sheets link (the tab in the link, if it names one)."""
+    m = _SHEET.search(url or '')
+    if not m:
+        raise SourceError('That is not a Google Sheets address (https://docs.google.com/spreadsheets/d/...).')
+    gid = re.search(r'[#&?]gid=(\d+)', url)
+    return f'https://docs.google.com/spreadsheets/d/{m.group(1)}/export?format=csv' + (f'&gid={gid.group(1)}' if gid else '')
+
+
+def parse_index(csv_text, author=''):
+    """Chapters listed by an index sheet with columns Date, Author, Chapter and (optionally) Note. Returns
+    [{'n', 'label', 'note', 'ts'}] for the author's rows, where ts is the listed date read as UTC+2 (the sheet's CEST) in epoch
+    seconds. Rows whose Chapter cell has no 'Chapter N' (side stories, notes) are ignored."""
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    head = next((i for i, r in enumerate(rows) if len(r) > 2 and r[0].strip().lower().startswith('date') and 'chapter' in ' '.join(r).lower()), None)
+    if head is None:
+        raise ValueError('That sheet has no Date / Author / Chapter columns.')
+    cols = {c.strip().lower(): i for i, c in enumerate(rows[head]) if c.strip()}
+    col_date, col_author, col_chapter = cols.get('date (cest)', cols.get('date', 0)), cols.get('author', 1), cols.get('chapter', 2)
+    col_note = cols.get('note')
+    out = []
+    for r in rows[head + 1:]:
+        if len(r) <= col_chapter or not r[col_date].strip():
+            continue
+        if author and r[col_author].strip().casefold() != author.casefold():
+            continue
+        m = _CHAPTER_LABEL.search(r[col_chapter])
+        if not m or not re.match(r'\d{4}/\d\d/\d\d', r[col_date].strip()):
+            continue
+        try:
+            when = datetime.strptime(r[col_date].strip(), '%Y/%m/%d %H:%M').replace(tzinfo=timezone.utc).timestamp() - 2 * 3600
+        except ValueError:
+            continue
+        note = r[col_note].strip() if col_note is not None and len(r) > col_note else ''
+        out.append({'n': int(m.group(1)), 'label': re.sub(r'\s+', ' ', r[col_chapter]).strip(), 'note': re.sub(r'\s+', ' ', note), 'ts': when})
+    return out
+
+
+def match_index(posts, rows):
+    """Pair posts with index rows. First by chapter number and date (within three days, so Chapter 5 of two eras do not mix up),
+    then leftovers one-to-one by posting time (within 36 hours), which catches mistitled posts. Returns
+    ({post_id: row}, unmatched rows, unmatched posts)."""
+    posts = sorted(posts, key=lambda p: p['created'])
+    free = list(rows)
+    matched, left = {}, []
+    for p in posts:
+        numbers = {int(n) for n in re.findall(r'\d+', p['title'])}
+        near = [r for r in free if r['n'] in numbers and abs(r['ts'] - p['created']) <= 3 * 86400]
+        if near:
+            best = min(near, key=lambda r: abs(r['ts'] - p['created']))
+            matched[p['id']] = best
+            free.remove(best)
+        else:
+            left.append(p)
+    still = []
+    for p in left:
+        near = [r for r in free if abs(r['ts'] - p['created']) <= 36 * 3600]
+        if near:
+            best = min(near, key=lambda r: abs(r['ts'] - p['created']))
+            matched[p['id']] = best
+            free.remove(best)
+        else:
+            still.append(p)
+    return matched, free, still
+
+
+def index_title(row, fallback):
+    return row['label'] + (f" \u2013 {row['note']}" if row['note'] else '') if row else fallback
+
+
+def refresh_index(source, follow, cache, now=time.time):
+    """Fetch the follow's chapter index at most once a day. A failure keeps the older copy and is remembered, not fatal."""
+    url = follow.get('index_url')
+    if not url:
+        return
+    data = cache.data.get('index') or {}
+    if data.get('url') == url and now() - data.get('fetched', 0) < INDEX_REFRESH_HOURS * 3600 and data.get('rows'):
+        return
+    try:
+        rows = parse_index(source.fetcher.get(sheet_csv_url(url)), follow.get('author_filter', ''))
+        cache.data['index'] = {'url': url, 'fetched': now(), 'rows': rows, 'error': ''}
+    except (IOError, ValueError, SourceError) as exc:
+        cache.data['index'] = dict(data, url=url, fetched=now() - INDEX_REFRESH_HOURS * 3600 + 3600, error=str(exc)[:200])
+    cache.save()
+
+
+def index_report(follow, cache):
+    """What the index says about the collected chapters: {'rows', 'matched', 'missing' (labels), 'unlisted' (post titles)}."""
+    data = cache.data.get('index') or {}
+    rows = data.get('rows') or []
+    matched, free, unlisted = match_index(list(cache.posts.values()), rows) if rows else ({}, [], [])
+    return {'rows': len(rows), 'matched': len(matched), 'missing': [r['label'] for r in free], 'unlisted': [p['title'] for p in unlisted],
+            'error': data.get('error', '')}
+
+
 def make_source(mode, client_id='', client_secret='', username='', cancelled=lambda: False, refresh_token=''):
     """The reader for the chosen mode, paced so as to stay within Reddit's limits for that mode."""
     if mode == 'api':
@@ -495,11 +601,11 @@ def probe(source, src, follow=None, limit=25):
 
 # ---------------------------------------------------------------- follows, filters, and the chapter cache
 
-def new_follow(name, source_text, title_filter='', author_filter='', author_note=False, layout='series', flair_filter=''):
+def new_follow(name, source_text, title_filter='', author_filter='', author_note=False, layout='series', flair_filter='', index_url=''):
     src = parse_source(source_text)
     return {'id': uuid.uuid4().hex[:10], 'name': name.strip() or describe_source(src), 'source': src,
             'title_filter': title_filter.strip(), 'author_filter': author_filter.strip().lstrip('/').replace('u/', '', 1),
-            'author_note': bool(author_note), 'layout': 'each' if layout == 'each' else 'series', 'flair_filter': flair_filter.strip(),
+            'author_note': bool(author_note), 'layout': 'each' if layout == 'each' else 'series', 'flair_filter': flair_filter.strip(), 'index_url': index_url.strip(),
             'last_checked': 0.0, 'last_status': ''}
 
 
@@ -648,6 +754,7 @@ def check_follow(source, follow, cache, max_pages=None, cancelled=lambda: False,
             cache.data['newest_created'], cache.data['newest_id'] = max(known_newest, newest[0]), newest[1] if newest[0] >= known_newest else known_id
         cache.save()
     pending = fetch_notes(source, follow, cache, cancelled, progress)
+    refresh_index(source, follow, cache)
     return {'new': new, 'changed': changed, 'pages': pages, 'notes_pending': pending}
 
 
@@ -683,13 +790,17 @@ def build_story(follow, cache):
     posts = cache.ordered()
     if not posts:
         raise ValueError('Nothing has been collected for this series yet.')
+    titles = {}
+    if (cache.data.get('index') or {}).get('rows'):
+        matched, _, _ = match_index(posts, cache.data['index']['rows'])
+        titles = {pid: index_title(row, None) for pid, row in matched.items()}
     author = Counter(p['author'] for p in posts).most_common(1)[0][0] or 'Unknown'
     last = datetime.fromtimestamp(posts[-1]['created'], timezone.utc).date().isoformat()
     first = datetime.fromtimestamp(posts[0]['created'], timezone.utc).date().isoformat()
     src = follow['source']
     tags = ['Reddit'] + ([f"r/{src['subreddit']}"] if src.get('subreddit') else [])
     return {'id': 'reddit-' + follow['id'], 'url': posts[-1]['link'] or WWW, 'title': follow['name'], 'author': author,
-            'sections': [(p['title'], chapter_html(p)) for p in posts], 'tags': tags, 'categories': [],
+            'sections': [(titles.get(p['id']) or p['title'], chapter_html(p)) for p in posts], 'tags': tags, 'categories': [],
             'summary': f"{len(posts)} chapters collected from Reddit ({describe_source(src)}), {first} to {last}.",
             'publisher': PUBLISHER, 'pubdate': first}
 
@@ -757,6 +868,14 @@ def run_follows(source, follows, cache_dir, cancelled=lambda: False, progress=la
                 follow['last_status'] += f"; {outcome['notes_pending']} author comment(s) still to fetch"
             elif follow.get('author_note') and not hasattr(source, 'author_comment'):
                 follow['last_status'] += '; author comments need the official API'
+            if follow.get('index_url'):
+                report = index_report(follow, cache)
+                if report['error']:
+                    follow['last_status'] += f"; chapter index not read ({report['error'][:60]})"
+                elif report['missing']:
+                    follow['last_status'] += f"; {len(report['missing'])} chapter(s) in the index have no Reddit post"
+                elif report['rows']:
+                    follow['last_status'] += '; matches the chapter index'
         except RateLimited as exc:
             result.update(rate_limited=True, retry_after=exc.retry_after, error=str(exc))
             follow['last_status'] = 'Reddit asked us to slow down; will try again later'

@@ -501,6 +501,13 @@ class RedditPluginTests(QtCase):
         follow = dialog.result_follow()
         self.assertEqual((follow['name'], follow['source']['user'], follow['author_filter']), ('Out of Cruel Space', 'KyleKKent', 'KyleKKent'))
         self.assertFalse(follow['author_note'], 'author comments are opt-in')
+        self.assertIn('docs.google.com/spreadsheets', follow['index_url'], 'the preset brings the public chapter index')
+        bad = self.ui.FollowDialog(None)
+        bad.source.setText('u/KyleKKent')
+        bad.index_url.setText('https://example.com/nope')
+        bad.try_accept()
+        self.assertIn('Google Sheets', bad.message.text())
+        self.assertEqual(bad.result(), 0, 'a bad index address does not close the dialog')
         self.assertTrue(self.core.matches({'title': 'OOCS, Into A Wider Galaxy, Part 800', 'author': 'KyleKKent', 'html': '<p>x</p>'}, follow),
                         'the preset keeps following after the series was renamed')
         dialog.author_note.setChecked(True)

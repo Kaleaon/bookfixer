@@ -291,6 +291,114 @@ class AuthorNoteTests(unittest.TestCase):
         self.assertFalse(core.due(dict(follow, notes_pending=False), 6, now=1000.0 + 1000))
 
 
+class IndexTests(unittest.TestCase):
+    """A public chapter-list sheet (shape taken from the real Out of Cruel Space index) names chapters and catches mistitled posts."""
+    CSV = ('Out of Cruel Space (an extension of the archive),,,,\n'
+           'Date (CEST),Author,Chapter,Note,,Seq\n'
+           '2021/05/19 04:30,KyleKKent,Chapter 001,Pirates,,1\n'
+           '2021/05/20 01:00,KyleKKent,Chapter 002,Pirates; Bounty Hunters,,2\n'
+           '2021/05/21 22:40,KyleKKent,Chapter 003 [NSFW],,,3\n'
+           '2024/05/22 22:12,KyleKKent,"Into A Wider Galaxy, Chapter 010",AAA,,4\n'
+           '2024/05/23 22:10,KyleKKent,"Into A Wider Galaxy, Chapter 011",RAK and Roll,,5\n'
+           '2021/09/26 21:00,KamchatkasRevenge,Of Dog 1,Canon,,6\n'
+           '2021/05/29 21:00,KyleKKent,Side story,Canon,,7\n'
+           '2021/06/01 10:00,KyleKKent,Chapter 004,Never posted,,8\n')
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def rows(self):
+        return core.parse_index(self.CSV, 'KyleKKent')
+
+    def test_sheet_address_becomes_a_csv_export(self):
+        self.assertEqual(core.sheet_csv_url('https://docs.google.com/spreadsheets/d/AbC-1_2/edit?pli=1&gid=99#gid=99'),
+                         'https://docs.google.com/spreadsheets/d/AbC-1_2/export?format=csv&gid=99')
+        self.assertEqual(core.sheet_csv_url('https://docs.google.com/spreadsheets/d/AbC/edit'), 'https://docs.google.com/spreadsheets/d/AbC/export?format=csv')
+        with self.assertRaises(core.SourceError):
+            core.sheet_csv_url('https://example.com/sheet')
+
+    def test_parsing_keeps_only_the_authors_numbered_chapters(self):
+        rows = self.rows()
+        self.assertEqual([r['label'] for r in rows], ['Chapter 001', 'Chapter 002', 'Chapter 003 [NSFW]', 'Into A Wider Galaxy, Chapter 010',
+                                                       'Into A Wider Galaxy, Chapter 011', 'Chapter 004'])
+        self.assertEqual((rows[1]['n'], rows[1]['note']), (2, 'Pirates; Bounty Hunters'))
+        self.assertAlmostEqual(rows[0]['ts'], core.datetime(2021, 5, 19, 2, 30, tzinfo=core.timezone.utc).timestamp())
+        with self.assertRaises(ValueError):
+            core.parse_index('a,b\n1,2\n')
+
+    def post(self, pid, title, when):
+        return {'id': pid, 'title': title, 'author': 'KyleKKent', 'html': '<p>x</p>', 'link': '', 'flair': '',
+                'created': core.datetime.strptime(when, '%Y-%m-%d %H:%M').replace(tzinfo=core.timezone.utc).timestamp()}
+
+    def posts(self):
+        return [self.post('t3_a', 'Out of Cruel Space, Part 1', '2021-05-19 03:00'), self.post('t3_b', 'Out of Cruel Space, Part 2', '2021-05-20 00:00'),
+                self.post('t3_c', 'Out of Cruel Space, Part 3', '2021-05-21 20:50'),
+                self.post('t3_d', 'OOCS, Into A Wider Galaxy, Part 1010', '2024-05-22 20:30'),   # a typo for Part 10
+                self.post('t3_e', 'OOCS, Into A Wider Galaxy, Part 011', '2024-05-23 21:00'),
+                self.post('t3_f', 'OOCS, Into A Wider Galaxy, Part 12', '2024-05-24 21:00')]  # newer than the sheet
+
+    def test_matching_by_number_then_by_time_catches_typos_and_reports_both_sides(self):
+        matched, missing, unlisted = core.match_index(self.posts(), self.rows())
+        self.assertEqual({pid: r['label'] for pid, r in matched.items()}, {
+            't3_a': 'Chapter 001', 't3_b': 'Chapter 002', 't3_c': 'Chapter 003 [NSFW]', 't3_d': 'Into A Wider Galaxy, Chapter 010',
+            't3_e': 'Into A Wider Galaxy, Chapter 011'})
+        self.assertEqual([r['label'] for r in missing], ['Chapter 004'], 'listed in the index but never posted')
+        self.assertEqual([p['id'] for p in unlisted], ['t3_f'], 'posted but not yet in the index')
+        self.assertEqual(core.index_title(matched['t3_b'], 'x'), 'Chapter 002 \u2013 Pirates; Bounty Hunters')
+        self.assertEqual(core.index_title(matched['t3_c'], 'x'), 'Chapter 003 [NSFW]')
+        self.assertEqual(core.index_title(None, 'fallback'), 'fallback')
+
+    def test_same_chapter_number_in_two_eras_does_not_mix_up(self):
+        rows = [{'n': 5, 'label': 'Chapter 005', 'note': '', 'ts': 1.6e9}, {'n': 5, 'label': 'Into A Wider Galaxy, Chapter 005', 'note': '', 'ts': 1.7e9}]
+        posts = [dict(self.post('t3_x', 'Part 5', '2021-01-01 00:00'), created=1.7e9 + 100), dict(self.post('t3_y', 'Part 5', '2021-01-01 00:00'), created=1.6e9 + 100)]
+        matched, _, _ = core.match_index(posts, rows)
+        self.assertEqual((matched['t3_x']['label'], matched['t3_y']['label']), ('Into A Wider Galaxy, Chapter 005', 'Chapter 005'))
+
+    def test_index_is_fetched_once_a_day_survives_failures_and_names_the_chapters(self):
+        calls = []
+
+        class Source:
+            mode = 'rss'
+
+            def __init__(s):
+                s.fetcher = s
+                s.fail = False
+
+            def get(s, url, **kwargs):
+                calls.append(url)
+                if s.fail:
+                    raise IOError('Could not fetch: HTTP Error 403')
+                return IndexTests.CSV
+
+            def page(s, src, after=None, limit=100):
+                return IndexTests.posts_for(self), None
+        follow = core.new_follow('Out of Cruel Space', 'u/KyleKKent', '', 'KyleKKent', index_url='https://docs.google.com/spreadsheets/d/AbC/edit?gid=5')
+        cache = core.ChapterCache(self.tmp.name, follow['id'])
+        source = Source()
+        core.check_follow(source, follow, cache)
+        self.assertEqual(calls, ['https://docs.google.com/spreadsheets/d/AbC/export?format=csv&gid=5'])
+        core.check_follow(source, follow, cache)
+        self.assertEqual(len(calls), 1, 'not fetched again within a day')
+        titles = [t for t, _ in core.build_story(follow, cache)['sections']]
+        self.assertEqual(titles[0], 'Chapter 001 \u2013 Pirates')
+        self.assertIn('Into A Wider Galaxy, Chapter 010 \u2013 AAA', titles, 'the mistitled post is named by the index')
+        self.assertEqual(titles[-1], 'OOCS, Into A Wider Galaxy, Part 12', 'a post the index does not list keeps its own title')
+        report = core.index_report(follow, cache)
+        self.assertEqual((report['rows'], report['matched'], report['missing'], report['unlisted']), (6, 5, ['Chapter 004'], ['OOCS, Into A Wider Galaxy, Part 12']))
+        # a failed refresh keeps the copy we have and says so
+        cache.data['index']['fetched'] = 0
+        source.fail = True
+        core.check_follow(source, follow, cache)
+        self.assertIn('403', cache.data['index']['error'])
+        self.assertEqual(len(cache.data['index']['rows']), 6)
+        self.assertEqual(core.index_report(follow, cache)['matched'], 5)
+
+    @staticmethod
+    def posts_for(test):
+        return [e for e in test.posts()]
+
+
 class DiscoveryTests(unittest.TestCase):
     """Finding stories, and whole series, on a subreddit like r/HFY (title shapes taken from its real top posts)."""
 

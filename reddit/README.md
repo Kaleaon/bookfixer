@@ -52,6 +52,16 @@ Checked on the real r/HFY: the top-of-all-time list showed 121 parts of *The Nat
 
 What it cannot do: it knows a series only by its author and title, so parts retitled partway (as Out of Cruel Space was) need the *Title contains* box adjusted by hand; a series with tag-only titles such as `[Jenkinsverse] 5.` shows up as pieces; and parts posted by several authors are not joined. Search and browse use Reddit's search, which returns only the first pages (the dialog looks through three).
 
+## Chapter index (a public spreadsheet)
+
+*Chapter index* in the Add/Edit dialog takes the address of a public Google Sheet that lists a series' chapters with the columns **Date, Author, Chapter** and (optionally) **Note**. The plugin reads it (at most once a day, as CSV; the sheet must be shared so anyone with the link can view it) and:
+
+- names each collected chapter from it, such as `Chapter 001 – Pirates` or `Into A Wider Galaxy, Chapter 010 – AAA` (the Note column is the storyline), instead of `…Part 1010`;
+- pairs posts with rows by chapter number and date, then by posting time, so **mistitled posts are fixed** (the real Out of Cruel Space has `Part 1010` for Chapter 10 and `Part 365` for Chapter 635);
+- tells you in the status column when the index lists a chapter Reddit has no post for (a missing chapter) or the other way round. A post the index does not list yet keeps its own title.
+
+The Quick start for Out of Cruel Space includes the community's sheet (an extension of Kerserv's archive, which the author links in his comments). Checked against it: 1,800 rows for KyleKKent, every one matched to a Reddit post, 65 storylines, and two Reddit posts not yet in the sheet (the newest chapter and a second post numbered 726). The same sheet lists 2,823 rows in all because it also covers other authors' side stories and fan works (for example 695 by KamchatkasRevenge), which is likely where a count above 2,000 comes from; the plugin follows only the author you name. If the sheet cannot be read the older copy is kept and the status says why.
+
 ## Long series, and comments
 
 Tried against the real history of Out of Cruel Space (by u/KyleKKent) with the official API: the author's post list reaches back to Part 1 (2021-05-19) and held 1,802 chapter posts, collected in about 40 seconds. The series was renamed part-way, from "Out of Cruel Space, Part N" (Parts 1-999) to "OOCS, Into A Wider Galaxy, Part N" (Parts 1-800 so far), so the Quick start now follows both names (but not the separate side stories). Earlier versions only matched the old name inside the newest 1,000 posts, which is how a book could stop at a couple of hundred chapters. A first check now reads back up to 30 pages at a time and keeps going on the next check until it reaches the beginning; editing a follow's filters makes it read back again.
