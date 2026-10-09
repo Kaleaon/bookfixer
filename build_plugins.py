@@ -15,6 +15,7 @@ PLUGINS = {
     'NiftyDownloader.zip': ('nifty', 'nifty_downloader', SHARED, False),
     'StoryCollectionTagger.zip': ('tagger', 'story_collection_tagger', [], False),
     'FanficDownloader.zip': ('fanfic', 'fanfic_downloader', SHARED, True),
+    'RedditStoryFollower.zip': ('reddit', 'reddit_follower', SHARED, False),
 }
 PLUGINS_BY_IMPORT = [v[1] for v in PLUGINS.values()]
 

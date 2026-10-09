@@ -5,8 +5,10 @@ behaviour, is real. This is what caught the 'finished task looks cancelled' bug 
 """
 import builtins
 import importlib
+import io
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import time
@@ -19,11 +21,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 try:
-    from PyQt6 import QtCore, QtWidgets
+    from PyQt6 import QtCore, QtGui, QtWidgets
     HAVE_QT = True
 except ImportError:  # also raised when system libraries such as libEGL are missing
     HAVE_QT = False
 import build_plugins  # noqa: E402
+sys.path.insert(0, str(ROOT / 'tests'))
+from reddit_samples import entry, feed  # noqa: E402
 
 TAG_INDEX = ('<p class="xy23R-sectionheaders">A</p>'
              '<a href="?list=tag&id=1">Alpha</a><a href="?list=tag&id=2">Beta</a><a href="?list=tag&id=90">All Tags</a>')
@@ -38,6 +42,14 @@ TAG_PAGES = {
     '1': story_row('one', 'Story One') + story_row('two', 'Story Two'),
     '2': story_row('two', 'Story Two') + story_row('three', 'Story Three'),
 }
+
+
+class StubMetadata:
+    def __init__(self, title, authors):
+        self.title, self.authors, self.ids, self.comments, self.tags = title, authors, {}, None, []
+
+    def set_identifier(self, key, value):
+        self.ids[key] = value
 
 
 class StubPrefs(dict):
@@ -84,13 +96,18 @@ class QtCase(unittest.TestCase):
     def setUp(self):
         self.saved = {k: v for k, v in sys.modules.items() if k.startswith(('calibre', 'qt', 'calibre_plugins'))}
         qtcore = types.ModuleType('qt.core')
-        for module in (QtWidgets, QtCore):
+        for module in (QtWidgets, QtGui, QtCore):
             for name in dir(module):
                 setattr(qtcore, name, getattr(module, name))
         sys.modules['qt'] = types.ModuleType('qt')
         sys.modules['qt.core'] = qtcore
         for name in ('calibre', 'calibre.customize', 'calibre.gui2', 'calibre.gui2.actions', 'calibre.utils'):
             sys.modules[name] = MagicMock()
+        for name in ('calibre.ebooks', 'calibre.ebooks.metadata', 'calibre.ebooks.metadata.book'):
+            sys.modules[name] = MagicMock()
+        base = types.ModuleType('calibre.ebooks.metadata.book.base')
+        base.Metadata = StubMetadata
+        sys.modules['calibre.ebooks.metadata.book.base'] = base
         config = types.ModuleType('calibre.utils.config')
         config.JSONConfig = lambda name: StubPrefs()
         sys.modules['calibre.utils.config'] = config
@@ -370,6 +387,267 @@ class NiftyAuthorDialogTests(QtCase):
         # reading again finds nothing new to fetch
         dialog.scan_contents()
         self.assertIn('already been read', dialog.summary.text())
+
+
+class RecordingBox:
+    """Stands in for QMessageBox: answers Yes to questions and records warnings."""
+    StandardButton = QtWidgets.QMessageBox.StandardButton if HAVE_QT else None
+    warnings = []
+
+    @staticmethod
+    def question(*args, **kwargs):
+        return QtWidgets.QMessageBox.StandardButton.Yes
+
+    @staticmethod
+    def warning(*args, **kwargs):
+        RecordingBox.warnings.append(args[2] if len(args) > 2 else '')
+
+
+class FakeDb:
+    """The part of Calibre's library API the plugin uses, keeping books in memory."""
+
+    def __init__(self):
+        self.books, self.next_id, self.writes = {}, 1, 0
+
+    def all_book_ids(self):
+        return set(self.books)
+
+    def all_field_for(self, field, ids, default=None):
+        return {i: dict(self.books[i]['mi'].ids) for i in ids}
+
+    def add_books(self, items, **kwargs):
+        ids = []
+        for mi, formats in items:
+            self.books[self.next_id] = {'mi': mi, 'formats': {k: v.read() for k, v in formats.items()}}
+            ids.append(self.next_id)
+            self.next_id += 1
+            self.writes += 1
+        return ids, []
+
+    def add_format(self, book_id, fmt, stream, replace=True):
+        self.books[book_id]['formats'][fmt] = stream.read()
+        self.writes += 1
+        return True
+
+    def set_field(self, name, mapping):
+        for book_id, value in mapping.items():
+            setattr(self.books[book_id]['mi'], name, value)
+
+
+def make_gui():
+    gui = QtWidgets.QWidget()
+    gui.db = FakeDb()
+    gui.current_db = MagicMock()
+    gui.current_db.new_api = gui.db
+    gui.library_view, gui.tags_view, gui.status_bar = MagicMock(), MagicMock(), MagicMock()
+    return gui
+
+
+@unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')
+class RedditPluginTests(QtCase):
+    def setUp(self):
+        super().setUp()
+        RecordingBox.warnings = []
+        sys.modules['calibre.gui2.actions'].InterfaceAction = object
+        self.package = self.load('reddit_follower')
+        self.core = importlib.import_module(self.package + '.core')
+        self.config = importlib.import_module(self.package + '.config')
+        self.ui = importlib.import_module(self.package + '.ui')
+        self.ui.QMessageBox = RecordingBox
+
+    def make_action(self):
+        action_module = importlib.import_module(self.package + '.action')
+        action = action_module.FollowerAction()
+        action.gui = make_gui()
+        action.qaction = MagicMock()
+        action.genesis()
+        action.poll_timer.setInterval(30)
+        self.tmp_cache = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_cache.cleanup)
+        action._cache_dir = self.tmp_cache.name
+        return action
+
+    # -- dialogs
+    def test_follow_dialog_validates_and_keeps_identity_when_edited(self):
+        dialog = self.ui.FollowDialog(None)
+        dialog.source.setText('hello world')
+        self.assertIn('Could not tell', dialog.message.text())
+        dialog.try_accept()
+        self.assertEqual(dialog.result(), 0, 'an unusable address does not close the dialog')
+        dialog.name.setText('Out of Cruel Space')
+        dialog.source.setText('https://www.reddit.com/r/HFY/search/?q=Out+of+Cruel+Space&restrict_sr=1')
+        dialog.title_filter.setText('Out of Cruel Space')
+        self.assertIn('Will follow search', dialog.message.text())
+        dialog.try_accept()
+        self.assertEqual(dialog.result(), 1)
+        follow = dialog.result_follow()
+        self.assertEqual((follow['name'], follow['source']['kind'], follow['title_filter']), ('Out of Cruel Space', 'search', 'Out of Cruel Space'))
+        follow['last_checked'] = 123.0
+        edit = self.ui.FollowDialog(None, follow)
+        edit.author_filter.setText('/u/Writer')
+        edited = edit.result_follow()
+        self.assertEqual((edited['id'], edited['author_filter'], edited['last_checked']), (follow['id'], 'Writer', 0.0), 'same series, checked again')
+
+    def test_settings_dialog_requires_a_client_id_for_the_api_and_clamps_the_interval(self):
+        dialog = self.ui.SettingsDialog(None)
+        dialog.api.setChecked(True)
+        dialog.save()
+        self.assertEqual(self.config.prefs['mode'], 'rss', 'nothing is saved without a client id')
+        self.assertEqual(len(RecordingBox.warnings), 1)
+        dialog.client_id.setText(' abc123 ')
+        dialog.username.setText('Reader')
+        dialog.hours.setValue(0.1)
+        dialog.save()
+        prefs = self.config.prefs
+        self.assertEqual((prefs['mode'], prefs['client_id'], prefs['username']), ('api', 'abc123', 'Reader'))
+        self.assertGreaterEqual(prefs['check_hours'], 1.0, 'never faster than hourly')
+
+    def test_manage_dialog_lists_and_removes_follows_and_their_cache(self):
+        follow = self.core.new_follow('Series', 'u/writer', 'Chapter')
+        self.config.prefs['follows'] = [follow]
+        cache_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(cache_dir, ignore_errors=True))
+        cache = self.core.ChapterCache(cache_dir, follow['id'])
+        cache.posts['t3_a'] = {'id': 't3_a', 'title': 'Chapter 1', 'author': 'writer', 'created': 1.0, 'link': '', 'html': '<p>x</p>'}
+        cache.save()
+
+        class Act:
+            def chapter_count(self, f):
+                return len(self.core.ChapterCache(cache_dir, f['id']).posts)
+
+            def cache_dir(self):
+                return cache_dir
+        act = Act()
+        act.core = self.core
+        dialog = self.ui.ManageDialog(None, act)
+        self.assertEqual(dialog.table.rowCount(), 1)
+        self.assertEqual([dialog.table.item(0, c).text() for c in (0, 2, 3)], ['Series', '1', 'never'])
+        self.assertIn('u/writer', dialog.table.item(0, 1).text())
+        self.assertIn('Chapter', dialog.table.item(0, 1).text())
+        dialog.table.selectRow(0)
+        dialog.remove()
+        self.assertEqual(dialog.table.rowCount(), 0)
+        self.assertEqual(self.config.prefs['follows'], [])
+        self.assertFalse(Path(cache.path).exists(), 'the cached chapters go with the follow')
+
+    # -- the whole life of a followed series, against a stand-in library and feed
+    def chapter(self, n, body=None):
+        return entry(f'c{n}', f'Out of Cruel Space (Chapter {n})', body or f'<p>Chapter {n} text.</p>', author='/u/Writer',
+                     stamp=f'2026-10-{n:02d}T10:00:00+00:00')
+
+    def test_follow_creates_updates_and_survives_rate_limits(self):
+        core = self.core
+
+        class FeedFake:
+            posts, limited = [], False
+
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                if FeedFake.limited:
+                    raise core.RateLimited(url, 77)
+                return feed(*FeedFake.posts)
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        db = action.gui.db
+        follow = core.new_follow('Out of Cruel Space', 'r/HFY', 'Out of Cruel Space')
+        self.config.prefs['follows'] = [follow]
+        FeedFake.posts = [self.chapter(3), self.chapter(2), entry('zz', 'Some unrelated story', '<p>no</p>'), self.chapter(1)]
+
+        def epub_chapters(book_id):
+            z = zipfile.ZipFile(io.BytesIO(db.books[book_id]['formats']['EPUB']))
+            return sorted(n for n in z.namelist() if n.startswith('OEBPS/s001_'))
+
+        action.check_now([follow])
+        self.assertEqual(len(db.books), 1, 'the book was created')
+        book_id = next(iter(db.books))
+        mi = db.books[book_id]['mi']
+        self.assertEqual((mi.title, mi.authors, mi.ids), ('Out of Cruel Space', ['Writer'], {'redditfollow': 'reddit-' + follow['id']}))
+        self.assertEqual(len(epub_chapters(book_id)), 3, 'three matching chapters, the unrelated post left out')
+        self.assertEqual(self.config.prefs['follows'][0]['last_status'], '3 new chapter(s)')
+        self.assertGreater(self.config.prefs['follows'][0]['last_checked'], 0)
+
+        # a new chapter arrives: the same book is updated in place
+        FeedFake.posts.insert(0, self.chapter(4))
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertEqual(len(db.books), 1)
+        self.assertEqual(len(epub_chapters(book_id)), 4)
+
+        # nothing new: the book is left alone
+        writes = db.writes
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertEqual(db.writes, writes)
+
+        # the user deleted the book: the next check brings it back from the cached chapters
+        del db.books[book_id]
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertEqual(len(db.books), 1)
+        self.assertEqual(len(epub_chapters(next(iter(db.books)))), 4)
+
+        # Reddit says slow down: stop, remember, and leave the library alone
+        FeedFake.limited = True
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertGreater(action.backoff_until, time.time() + 14 * 60, 'at least a quarter of an hour of peace')
+        self.assertIn('slow down', self.config.prefs['follows'][0]['last_status'])
+        self.assertEqual(len(db.books), 1)
+
+    def test_automatic_check_runs_in_the_background_and_respects_the_schedule(self):
+        core = self.core
+
+        class FeedFake:
+            posts = []
+            calls = 0
+
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                FeedFake.calls += 1
+                return feed(*FeedFake.posts)
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        follow = core.new_follow('Out of Cruel Space', 'r/HFY', 'Out of Cruel Space')
+        self.config.prefs['follows'] = [follow]
+        FeedFake.posts = [self.chapter(2), self.chapter(1)]
+
+        def wait():
+            deadline = time.time() + 15
+            while action.busy and time.time() < deadline:
+                QtWidgets.QApplication.processEvents()
+                time.sleep(0.02)
+            QtWidgets.QApplication.processEvents()
+            self.assertFalse(action.busy, 'the background check should finish')
+
+        self.config.prefs['auto_check'] = False
+        action.auto_check()
+        self.assertFalse(action.busy, 'automatic checking can be switched off')
+        self.assertEqual(FeedFake.calls, 0)
+
+        self.config.prefs['auto_check'] = True
+        action.auto_check()
+        self.assertTrue(action.busy)
+        wait()
+        self.assertEqual(len(action.gui.db.books), 1)
+        self.assertTrue(action.gui.status_bar.show_message.called, 'a quiet note in the status bar')
+        calls = FeedFake.calls
+        action.auto_check()
+        self.assertFalse(action.busy)
+        self.assertEqual(FeedFake.calls, calls, 'just checked, so not due again yet')
+
+        live = self.config.prefs['follows']
+        live[0]['last_checked'] = 1.0
+        self.config.prefs['follows'] = live
+        action.backoff_until = time.time() + 3600
+        action.auto_check()
+        self.assertFalse(action.busy, 'a recent rate limit holds automatic checks back')
+        action.backoff_until = 0
+        FeedFake.posts.insert(0, self.chapter(3))
+        action.auto_check()
+        wait()
+        book = next(iter(action.gui.db.books.values()))
+        z = zipfile.ZipFile(io.BytesIO(book['formats']['EPUB']))
+        self.assertEqual(len([n for n in z.namelist() if n.startswith('OEBPS/s001_')]), 3)
 
 
 @unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')

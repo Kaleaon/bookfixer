@@ -151,3 +151,24 @@ class DownloadTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RateLimitTests(unittest.TestCase):
+    def test_429_raises_immediately_with_retry_after_and_is_not_retried(self):
+        import urllib.error
+        calls = []
+
+        class Headers(dict):
+            def get(self, k, d=None):
+                return dict.get(self, k, d)
+
+        def opener(req, timeout):
+            calls.append(1)
+            raise urllib.error.HTTPError(req.full_url, 429, 'Too Many Requests', Headers({'Retry-After': '120'}), None)
+
+        fetcher = core.Fetcher(min_interval=0, opener=opener)
+        with self.assertRaises(core.RateLimited) as caught:
+            fetcher.get('https://example.org/x')
+        self.assertEqual(caught.exception.retry_after, 120)
+        self.assertEqual(len(calls), 1, 'a rate limit must not be hammered with retries')
+        self.assertIsInstance(caught.exception, IOError, 'callers that catch IOError keep working')

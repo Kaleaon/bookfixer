@@ -20,6 +20,14 @@ class Cancelled(Exception):
     pass
 
 
+class RateLimited(IOError):
+    """The site asked us to slow down (HTTP 429). retry_after is the number of seconds it asked for, or None."""
+
+    def __init__(self, url, retry_after=None):
+        super().__init__(f'The site is limiting requests (HTTP 429) for {url}' + (f'; it asked for {retry_after} seconds' if retry_after else ''))
+        self.retry_after = retry_after
+
+
 class Fetcher:
     """Throttled HTTP GET with retries, gzip support and cooperative cancellation."""
 
@@ -54,6 +62,12 @@ class Fetcher:
                     return decode(raw, resp.headers.get_content_charset())
             except HTTPError as exc:
                 last_error = exc
+                if exc.code == 429:  # never retry into a rate limit; report it and let the caller back off
+                    try:
+                        retry_after = int(exc.headers.get('Retry-After', '')) if exc.headers else None
+                    except (TypeError, ValueError):
+                        retry_after = None
+                    raise RateLimited(url, retry_after)
                 if exc.code in (400, 401, 403, 404, 410, 416):
                     break  # retrying will not help
             except (URLError, OSError, EOFError) as exc:

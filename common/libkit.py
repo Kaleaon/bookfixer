@@ -81,3 +81,34 @@ def add_prebuilt(gui, items):
         gui.library_view.model().refresh()
         gui.tags_view.recount()
     return added, errors
+
+
+def find_book(gui, identifier, value):
+    """Id of the first library book carrying identifier:value, or None."""
+    db = gui.current_db.new_api
+    for book_id, idents in db.all_field_for('identifiers', db.all_book_ids(), {}).items():
+        if idents and idents.get(identifier) == value:
+            return book_id
+    return None
+
+
+def upsert_epub(gui, mi, data, identifier, value):
+    """Create the book, or replace the EPUB of the one already carrying identifier:value (and refresh its description).
+    Returns (book_id, created)."""
+    db = gui.current_db.new_api
+    book_id = find_book(gui, identifier, value)
+    if book_id is None:
+        ids, _ = db.add_books([(mi, {'EPUB': BytesIO(data)})])
+        if not ids:
+            raise ValueError('Calibre did not add the book')
+        created = True
+        book_id = ids[0]
+    else:
+        if not db.add_format(book_id, 'EPUB', BytesIO(data), replace=True):
+            raise ValueError('Calibre did not save the updated EPUB')
+        if mi.comments:
+            db.set_field('comments', {book_id: mi.comments})
+        created = False
+    gui.library_view.model().refresh_ids([book_id])
+    gui.tags_view.recount()
+    return book_id, created

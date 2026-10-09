@@ -5,9 +5,9 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 try:  # inside Calibre the shared module ships in the plugin package
-    from .storykit import Cancelled, Fetcher, build_epub as _build_epub, clean_fragment, escape, strip_tags  # noqa: F401
+    from .storykit import Cancelled, Fetcher, RateLimited, build_epub as _build_epub, clean_fragment, escape, strip_tags  # noqa: F401
 except ImportError:  # tests load this file directly with common/ on sys.path
-    from storykit import Cancelled, Fetcher, build_epub as _build_epub, clean_fragment, escape, strip_tags  # noqa: F401
+    from storykit import Cancelled, Fetcher, RateLimited, build_epub as _build_epub, clean_fragment, escape, strip_tags  # noqa: F401
 
 SITE = 'https://www.nifty.org/nifty/'
 PUBLISHER = 'Nifty'
