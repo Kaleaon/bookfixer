@@ -544,6 +544,61 @@ class RedditPluginTests(QtCase):
         self.assertEqual(self.config.prefs['follows'], [])
         self.assertFalse(Path(cache.path).exists(), 'the cached chapters go with the follow')
 
+    def test_settings_test_button_uses_the_values_on_screen_and_saves_nothing(self):
+        core = self.core
+        seen = []
+
+        class FeedFake:
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                seen.append(url)
+                if FeedFake.limited:
+                    raise core.RateLimited(url, 300)
+                return feed(entry('a1', 'Chapter 1', '<p>One.</p>'), entry('a2', 'Chapter 2', '<p>Two.</p>'))
+            limited = False
+        core.Fetcher = FeedFake
+        before = dict(self.config.prefs)
+        dialog = self.ui.SettingsDialog(None)
+        dialog.test_connection()
+        self.assertTrue(dialog.test_result.text().startswith('OK: Reddit answered through the public feed: 2 post(s)'), dialog.test_result.text())
+        self.assertEqual(len(seen), 1)
+        self.assertIn('/r/HFY/new.rss', seen[0])
+        FeedFake.limited = True
+        dialog.test_connection()
+        self.assertTrue(dialog.test_result.text().startswith('Problem: Reddit asked us to slow down'), dialog.test_result.text())
+        dialog.api.setChecked(True)  # no client id typed: the test says so instead of crashing
+        dialog.test_connection()
+        self.assertIn('client id', dialog.test_result.text())
+        self.assertEqual(dict(self.config.prefs), before, 'testing must not change saved settings')
+
+    def test_test_selected_reports_how_many_posts_match_the_follow(self):
+        core = self.core
+        page = feed(self.chapter(2), self.chapter(1), entry('zz', 'Unrelated', '<p>no</p>'))
+
+        class FeedFake:
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                return page
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        follow = core.new_follow('Out of Cruel Space', 'r/HFY', 'Out of Cruel Space')
+        self.config.prefs['follows'] = [follow]
+        action_module = importlib.import_module(self.package + '.action')
+        action_module.info_dialog.reset_mock()
+        dialog = self.ui.ManageDialog(None, action)
+        dialog.table.selectRow(0)
+        dialog.test_selected()
+        title, text = action_module.info_dialog.call_args[0][1], action_module.info_dialog.call_args[0][2]
+        self.assertIn('Out of Cruel Space', title)
+        self.assertIn('3 post(s)', text)
+        self.assertIn('2 match your filters', text)
+        self.assertEqual(self.config.prefs['follows'][0]['last_checked'], 0.0, 'a test is not a check')
+        self.assertEqual(action.gui.db.books, {}, 'a test never touches the library')
+
     # -- the whole life of a followed series, against a stand-in library and feed
     def chapter(self, n, body=None):
         return entry(f'c{n}', f'Out of Cruel Space (Chapter {n})', body or f'<p>Chapter {n} text.</p>', author='/u/Writer',

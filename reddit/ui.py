@@ -6,6 +6,7 @@ from qt.core import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogBu
 
 from calibre_plugins.reddit_follower import core
 from calibre_plugins.reddit_follower.config import prefs
+from calibre_plugins.reddit_follower.guikit import run_task
 
 ACCESS_NOTE = (
     'Two ways to read Reddit, and what is known about each:\n'
@@ -145,6 +146,15 @@ class SettingsDialog(QDialog):
         row.addStretch(1)
         layout.addLayout(row)
         layout.addWidget(QLabel('Checks only run while Calibre is open (there is no background service), and the interval is never shorter than one hour.'))
+        row = QHBoxLayout()
+        test = QPushButton('Test connection')
+        test.setToolTip('Makes one request to r/HFY with the settings above (nothing is saved or changed)')
+        test.clicked.connect(self.test_connection)
+        row.addWidget(test)
+        self.test_result = QLabel('')
+        self.test_result.setWordWrap(True)
+        row.addWidget(self.test_result, 1)
+        layout.addLayout(row)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
@@ -153,6 +163,16 @@ class SettingsDialog(QDialog):
     def sync(self, *_):
         for widget in (self.client_id, self.client_secret, self.username):
             widget.setEnabled(self.api.isChecked())
+
+    def test_connection(self):
+        mode = 'api' if self.api.isChecked() else 'rss'
+        client_id, secret, username = self.client_id.text().strip(), self.client_secret.text().strip(), self.username.text().strip()
+        src = core.parse_source('r/HFY')
+        task = run_task(self, 'Testing Reddit…', lambda t: core.probe(core.make_source(mode, client_id, secret, username, t.cancelled), src, limit=5))
+        if task.error:
+            self.test_result.setText(f'The test failed: {task.error}')
+        elif task.result is not None:
+            self.test_result.setText(('OK: ' if task.result[0] else 'Problem: ') + task.result[1])
 
     def save(self):
         if self.api.isChecked() and not self.client_id.text().strip():
@@ -186,7 +206,7 @@ class ManageDialog(QDialog):
         self.mode_label = QLabel('')
         layout.addWidget(self.mode_label)
         row = QHBoxLayout()
-        for label, slot in (('Add…', self.add), ('Edit…', self.edit), ('Remove', self.remove), ('Check selected now', self.check_selected),
+        for label, slot in (('Add…', self.add), ('Edit…', self.edit), ('Remove', self.remove), ('Test selected', self.test_selected), ('Check selected now', self.check_selected),
                             ('Check all now', self.check_all), ('Settings…', self.settings)):
             button = QPushButton(label)
             button.clicked.connect(slot)
@@ -248,6 +268,11 @@ class ManageDialog(QDialog):
             core.ChapterCache(self.action.cache_dir(), follow['id']).delete()
         prefs['follows'] = [f for f in self.follows() if f['id'] not in ids]
         self.refresh()
+
+    def test_selected(self):
+        ids = self.selected_ids()
+        if len(ids) == 1:
+            self.action.test_follow(next(f for f in self.follows() if f['id'] == ids[0]))
 
     def check_selected(self):
         ids = self.selected_ids()

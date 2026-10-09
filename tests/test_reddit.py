@@ -187,6 +187,66 @@ def post(n, title=None, html=None, author='Writer'):
             'link': f'https://www.reddit.com/r/HFY/comments/{n:03d}/x/', 'html': html if html is not None else f'<p>Chapter {n} text.</p>', 'subreddit': 'HFY'}
 
 
+class ProbeTests(unittest.TestCase):
+    SRC = core.parse_source('r/HFY')
+
+    def follow(self, **kw):
+        return dict({'title_filter': 'Out of Cruel Space', 'author_filter': ''}, **kw)
+
+    def test_a_good_answer_reports_counts_and_filter_matches(self):
+        source = FakeSource([post(3), post(2), post(1, title='Unrelated tale'), post(9, html='')], per_page=10)
+        ok, message = core.probe(source, self.SRC, self.follow())
+        self.assertTrue(ok)
+        self.assertIn('4 post(s), 3 with story text', message)
+        self.assertIn('2 match your filters', message)
+        self.assertIn('Out of Cruel Space (Chapter 3)', message, 'the newest match is named')
+        self.assertEqual(len(source.calls), 1, 'a probe makes exactly one request')
+        self.assertIn('public feed', message)
+
+    def test_without_a_follow_and_when_nothing_matches_yet(self):
+        ok, message = core.probe(FakeSource([post(1, title='Other')], per_page=5), self.SRC)
+        self.assertTrue(ok)
+        self.assertNotIn('match', message)
+        ok, message = core.probe(FakeSource([post(1, title='Other')], per_page=5), self.SRC, self.follow())
+        self.assertIn('none on this first page', message)
+
+    def test_empty_listing(self):
+        ok, message = core.probe(FakeSource([], per_page=5), self.SRC)
+        self.assertTrue(ok)
+        self.assertIn('no posts', message)
+
+    def test_problems_are_reported_not_raised(self):
+        class Raising:
+            mode = 'rss'
+
+            def __init__(self, exc):
+                self.exc = exc
+
+            def page(self, *args, **kwargs):
+                raise self.exc
+        ok, message = core.probe(Raising(core.RateLimited('u', 600)), self.SRC)
+        self.assertFalse(ok)
+        self.assertIn('429', message)
+        self.assertIn('10 minute', message)
+        ok, message = core.probe(Raising(core.RateLimited('u')), self.SRC)
+        self.assertIn('429', message)
+        ok, message = core.probe(Raising(IOError('Could not fetch x: HTTP Error 403')), self.SRC)
+        self.assertFalse(ok)
+        self.assertIn('403', message)
+        ok, message = core.probe(Raising(ValueError('not XML')), self.SRC)
+        self.assertIn('usable answer', message)
+        ok, message = core.probe(core.ApiSource(core.Fetcher(min_interval=0), '', '', ''), self.SRC)
+        self.assertFalse(ok)
+        self.assertIn('client id', message)
+
+    def test_make_source_picks_the_reader_and_the_pace(self):
+        feed_source = core.make_source('rss')
+        self.assertEqual((feed_source.mode, feed_source.fetcher.min_interval), ('rss', core.MIN_FEED_INTERVAL))
+        api_source = core.make_source('api', 'abc', '', 'me')
+        self.assertEqual((api_source.mode, api_source.fetcher.min_interval), ('api', core.MIN_API_INTERVAL))
+        self.assertEqual(api_source.user_agent, 'calibre:reddit-follower:1.0 (by /u/me)')
+
+
 class CheckTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

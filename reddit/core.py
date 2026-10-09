@@ -286,6 +286,37 @@ class ApiSource:
         return parse_listing(text)
 
 
+def make_source(mode, client_id='', client_secret='', username='', cancelled=lambda: False):
+    """The reader for the chosen mode, paced so as to stay within Reddit's limits for that mode."""
+    if mode == 'api':
+        return ApiSource(Fetcher(min_interval=MIN_API_INTERVAL, cancelled=cancelled), client_id, client_secret, username)
+    return FeedSource(Fetcher(min_interval=MIN_FEED_INTERVAL, cancelled=cancelled))
+
+
+def probe(source, src, follow=None, limit=25):
+    """Make ONE request and say what came back. Returns (ok, message); never raises for network or format problems."""
+    try:
+        entries, _ = source.page(src, None, limit)
+    except RateLimited as exc:
+        wait = f' It asked for about {max(1, round(exc.retry_after / 60))} minute(s).' if exc.retry_after else ''
+        return False, ('Reddit asked us to slow down (HTTP 429).' + wait + ' Shared and cloud networks hit this far more often than a home '
+                       'connection. Wait a while and try again; the plugin itself will back off the same way.')
+    except SourceError as exc:
+        return False, str(exc)
+    except (IOError, ValueError) as exc:
+        return False, f'Reddit did not give a usable answer: {exc}'
+    if not entries:
+        return True, f'Reddit answered, but {describe_source(src)} returned no posts.'
+    with_text = [e for e in entries if e.get('html')]
+    parts = [f'Reddit answered through the {"official API" if source.mode == "api" else "public feed"}: {len(entries)} post(s), '
+             f'{len(with_text)} with story text']
+    if follow is not None:
+        mine = [e for e in entries if matches(e, follow)]
+        parts.append(f'{len(mine)} match your filters' + (f', newest \u201c{max(mine, key=lambda e: e["created"])["title"]}\u201d' if mine else
+                                                          ' (none on this first page; the first check reads further back)'))
+    return True, '; '.join(parts) + '.'
+
+
 # ---------------------------------------------------------------- follows, filters, and the chapter cache
 
 def new_follow(name, source_text, title_filter='', author_filter=''):

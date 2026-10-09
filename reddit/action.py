@@ -58,10 +58,7 @@ class FollowerAction(InterfaceAction):
         return len(core.ChapterCache(self.cache_dir(), follow['id']).posts)
 
     def make_source(self, cancelled):
-        if prefs['mode'] == 'api':
-            return core.ApiSource(core.Fetcher(min_interval=core.MIN_API_INTERVAL, cancelled=cancelled),
-                                  prefs['client_id'], prefs['client_secret'], prefs['username'])
-        return core.FeedSource(core.Fetcher(min_interval=core.MIN_FEED_INTERVAL, cancelled=cancelled))
+        return core.make_source(prefs['mode'], prefs['client_id'], prefs['client_secret'], prefs['username'], cancelled)
 
     # -- entry points
     def manage(self):
@@ -90,6 +87,14 @@ class FollowerAction(InterfaceAction):
         if task.result is None:
             return
         self.finish(task.result, interactive=True)
+
+    def test_follow(self, follow):
+        """One request for the first page of this follow, reported to the user. Changes nothing."""
+        task = run_task(self.gui, 'Testing…', lambda t: core.probe(self.make_source(t.cancelled), follow['source'], follow))
+        if task.error:
+            return error_dialog(self.gui, 'Reddit stories', f'The test failed: {task.error}', show=True)
+        if task.result is not None:
+            info_dialog(self.gui, f"Test: {follow['name']}", task.result[1], show=True)
 
     # -- automatic checks (quiet, in a background thread)
     def auto_check(self):
