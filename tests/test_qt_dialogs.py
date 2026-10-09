@@ -488,6 +488,20 @@ class RedditPluginTests(QtCase):
         edited = edit.result_follow()
         self.assertEqual((edited['id'], edited['author_filter'], edited['last_checked']), (follow['id'], 'Writer', 0.0), 'same series, checked again')
 
+    def test_quick_start_preset_fills_the_dialog_for_out_of_cruel_space(self):
+        dialog = self.ui.FollowDialog(None)
+        self.assertEqual(dialog.preset.count(), 1 + len(self.core.PRESETS))
+        dialog.preset.setCurrentIndex(1)
+        self.assertEqual((dialog.name.text(), dialog.source.text(), dialog.title_filter.text(), dialog.author_filter.text()),
+                         ('Out of Cruel Space', 'u/KyleKKent', 'Out of Cruel Space', 'KyleKKent'))
+        self.assertIn('Will follow u/KyleKKent', dialog.message.text())
+        dialog.try_accept()
+        self.assertEqual(dialog.result(), 1)
+        follow = dialog.result_follow()
+        self.assertEqual((follow['name'], follow['source']['user'], follow['author_filter']), ('Out of Cruel Space', 'KyleKKent', 'KyleKKent'))
+        edit = self.ui.FollowDialog(None, follow)
+        self.assertFalse(hasattr(edit, 'preset'), 'editing an existing follow offers no presets')
+
     def test_settings_dialog_requires_a_client_id_for_the_api_and_clamps_the_interval(self):
         dialog = self.ui.SettingsDialog(None)
         dialog.api.setChecked(True)

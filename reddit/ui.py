@@ -1,7 +1,7 @@
 """Dialogs for following Reddit stories. Network work happens in the action, never here."""
 import time
 
-from qt.core import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
+from qt.core import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
                      QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, Qt, QVBoxLayout)
 
 from calibre_plugins.reddit_follower import core
@@ -28,6 +28,16 @@ class FollowDialog(QDialog):
         self.resize(560, 360)
         self.follow = follow
         layout = QVBoxLayout(self)
+        if follow is None:
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Quick start'))
+            self.preset = QComboBox()
+            self.preset.addItem('Fill in by hand…')
+            for preset in core.PRESETS:
+                self.preset.addItem(preset['label'])
+            self.preset.currentIndexChanged.connect(self.use_preset)
+            row.addWidget(self.preset, 1)
+            layout.addLayout(row)
         form = QFormLayout()
         self.name = QLineEdit(follow['name'] if follow else '')
         self.name.setPlaceholderText('Book title, for example Out of Cruel Space')
@@ -55,6 +65,15 @@ class FollowDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.check_source()
+
+    def use_preset(self, index):
+        if index <= 0:
+            return
+        preset = core.PRESETS[index - 1]
+        self.name.setText(preset['name'])
+        self.source.setText(preset['source'])
+        self.title_filter.setText(preset['title_filter'])
+        self.author_filter.setText(preset['author_filter'])
 
     def check_source(self, *_):
         text = self.source.text().strip()

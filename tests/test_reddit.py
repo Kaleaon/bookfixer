@@ -116,6 +116,32 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(entries[1]['html'], '')
 
 
+class RealPostShapeTests(unittest.TestCase):
+    """Mirrors the shape of the first real Out of Cruel Space post: comma title, author, trailing Next link."""
+
+    def real_shaped(self):
+        body = ('<p>First paragraph of the chapter.</p><p>Second paragraph.</p>'
+                '<p><a href="https://www.reddit.com/r/HFY/comments/nfsakq/out_of_cruel_space_part_1/">Next</a></p>')
+        return feed(entry('nfsakq', 'Out of Cruel Space, Part 1', body, author='/u/KyleKKent', stamp='2021-05-19T14:00:00+00:00'))
+
+    def test_entry_parses_and_the_trailing_next_link_is_removed(self):
+        entries, _ = core.parse_atom(self.real_shaped())
+        e = entries[0]
+        self.assertEqual((e['id'], e['title'], e['author']), ('t3_nfsakq', 'Out of Cruel Space, Part 1', 'KyleKKent'))
+        self.assertEqual(e['html'], '<p>First paragraph of the chapter.</p><p>Second paragraph.</p>')
+
+    def test_preset_matches_the_series_posts_and_nothing_else(self):
+        preset = core.PRESETS[0]
+        follow = core.new_follow(preset['name'], preset['source'], preset['title_filter'], preset['author_filter'])
+        self.assertEqual((follow['source']['kind'], follow['source']['user']), ('user', 'KyleKKent'))
+        e = core.parse_atom(self.real_shaped())[0][0]
+        self.assertTrue(core.matches(e, follow))
+        for other in (dict(e, title='Something Else, Part 1'), dict(e, author='SomeoneElse')):
+            self.assertFalse(core.matches(other, follow))
+        for title in ('Out of Cruel Space, Part 2', 'Out of Cruel Space: Part 10', 'OUT OF CRUEL SPACE - Part 3'):
+            self.assertTrue(core.matches(dict(e, title=title), follow), title)
+
+
 class FilterTests(unittest.TestCase):
     def post(self, title='Out of Cruel Space (Chapter 3)', author='Writer', html='<p>x</p>'):
         return {'id': 't3_a', 'title': title, 'author': author, 'html': html}

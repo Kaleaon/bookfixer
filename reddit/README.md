@@ -17,7 +17,7 @@ Follows story series that are posted on Reddit, such as chapters in r/HFY, as a 
 4. **Title contains** (and optionally **Posted by**): keeps only the posts that belong to the series, for example `Out of Cruel Space`. Start the text with `re:` for a regular expression, such as `re:chapter\s+\d+`.
 5. Press **Check selected now**. The first check reads back through the feed; later checks read only until they reach posts they have already seen.
 
-**Out of Cruel Space:** I could not identify its author from public information, so I did not hard-code anything. Use a search address for r/HFY with *Title contains* `Out of Cruel Space`, or follow the author's `u/name` if you know it.
+**Out of Cruel Space** is by u/KyleKKent on r/HFY; its first post is titled "Out of Cruel Space, Part 1" (2021-05-19). The quickest way to follow it is **Quick start → Out of Cruel Space (r/HFY, by KyleKKent)** in the Add dialog, which fills in: book title *Out of Cruel Space*, where to look `u/KyleKKent`, title contains `Out of Cruel Space`, posted by `KyleKKent`. Reading that real first post with the plugin gave the full 12,800-character chapter and removed the trailing "Next" link. I did not fetch the rest of the series, so how many parts there are, and whether the author's list reaches all of them, is unconfirmed.
 
 ## Automatic updates
 
@@ -43,7 +43,7 @@ Choose the API if you have, or can get, approval from Reddit: it is the supporte
 
 ## What was and was not verified
 
-- Verified against a **real r/HFY feed**: the Atom parser read 25 posts correctly, each with its full story text (4 to 26 KB), author, date and next-page token.
+- Verified against a **real r/HFY feed**: the Atom parser read 25 posts correctly, each with its full story text (4 to 26 KB), author, date and next-page token. Also verified on the real first post of Out of Cruel Space (one post, with its trailing "Next" link removed).
 - **Not verified live**: the search-feed form and the page-by-page backfill (Reddit rate-limited my test requests, and I stopped rather than push it), and the whole **official API path** (no credentials were available). The API code is written to Reddit's documentation and tested against a stand-in server.
 - Verified with real Qt and a stand-in Calibre library: creating a book, updating it in place when a chapter arrives, leaving it alone when nothing changed, recreating it after you delete it, backing off after a rate limit, and the automatic background check respecting the schedule. **Not run inside Calibre itself.**
 

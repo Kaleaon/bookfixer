@@ -88,6 +88,13 @@ def describe_source(src):
     return f"search “{src['query']}”" + (f" in r/{src['subreddit']}" if src['subreddit'] else '')
 
 
+# Ready-made follows for series the user asked for. Authors and title patterns were read from the series' own first post.
+PRESETS = [
+    {'label': 'Out of Cruel Space (r/HFY, by KyleKKent)', 'name': 'Out of Cruel Space', 'source': 'u/KyleKKent',
+     'title_filter': 'Out of Cruel Space', 'author_filter': 'KyleKKent'},
+]
+
+
 def source_text(src):
     """The source as an address parse_source() reads back, for filling in the edit box."""
     if src['kind'] == 'subreddit':
