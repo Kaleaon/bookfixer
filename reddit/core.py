@@ -252,7 +252,7 @@ def parse_listing(json_text):
             'created': float(d.get('created_utc') or 0),
             'link': 'https://www.reddit.com' + d.get('permalink', ''),
             'html': main_html(d['selftext_html']) if d.get('selftext_html') else '',
-            'subreddit': d.get('subreddit', ''), 'flair': (d.get('link_flair_text') or '').strip(),
+            'subreddit': d.get('subreddit', ''), 'flair': (d.get('link_flair_text') or '').strip(), 'score': int(d.get('score') or 0),
         })
     return entries, listing.get('after')
 
@@ -393,8 +393,9 @@ def group_series(entries):
             continue
         stem, number = series_parts(e['title'])
         g = groups.setdefault((e.get('author', '').casefold(), _stem_key(stem)), {
-            'name': stem, 'author': e.get('author', ''), 'posts': {}, 'numbers': set(), 'flairs': set()})
+            'name': stem, 'author': e.get('author', ''), 'posts': {}, 'numbers': set(), 'flairs': set(), 'score': 0})
         g['posts'][e['id']] = e
+        g['score'] = g.get('score', 0) + int(e.get('score') or 0)  # public feeds carry no score, so this stays 0 without the API
         if number is not None:
             g['numbers'].add(number)
         if e.get('flair'):
@@ -405,6 +406,29 @@ def group_series(entries):
         g['is_series'] = len(g['numbers']) >= 2 or any(re.search(r'(?i)series', f) for f in g['flairs']) and len(g['posts']) >= 2
         out.append(g)
     return sorted(out, key=lambda g: (-g['is_series'], -len(g['posts']), g['name'].casefold()))
+
+
+def rank_groups(groups, by='score'):
+    """Series first, then by total rating of the posts found ('score') or by how many parts were found ('posts')."""
+    key = (lambda g: g.get('score', 0)) if by == 'score' else (lambda g: len(g['posts']))
+    return sorted(groups, key=lambda g: (-g['is_series'], -key(g), -len(g['posts']), g['name'].casefold()))
+
+
+def followed_keys(follows):
+    """(author, name) of series already followed, to avoid adding the same one twice."""
+    keys = set()
+    for f in follows:
+        if f.get('author_filter'):
+            keys.add((f['author_filter'].casefold(), _stem_key(f['name'])))
+    return keys
+
+
+def top_series(groups, count=5, min_parts=3, follows=()):
+    """The highest rated series among discovered groups: real series with at least `min_parts` parts found, not already followed."""
+    taken = followed_keys(follows)
+    chosen = [g for g in rank_groups(groups, 'score') if g['is_series'] and len(g['posts']) >= min_parts
+              and (g['author'].casefold(), _stem_key(g['name'])) not in taken]
+    return chosen[:count]
 
 
 BROWSE = [('relevance', 'Best match for the search words'), ('top-all', 'Top of all time'), ('top-year', 'Top this year'),

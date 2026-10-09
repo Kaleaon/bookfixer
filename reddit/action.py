@@ -68,9 +68,12 @@ class FollowerAction(InterfaceAction):
     def discover(self):
         """Search or browse a subreddit for stories and whole series; a chosen series is added and collected at once."""
         dialog = DiscoverDialog(self.gui, self)
-        if dialog.exec() == DiscoverDialog.DialogCode.Accepted and dialog.chosen is not None:
-            prefs['follows'] = prefs['follows'] + [dialog.chosen]
-            self.check_now([dialog.chosen])
+        if dialog.exec() != DiscoverDialog.DialogCode.Accepted:
+            return
+        added = ([dialog.chosen] if dialog.chosen is not None else []) + list(dialog.chosen_many)
+        if added:
+            prefs['follows'] = prefs['follows'] + added
+            self.check_now(added)
 
     def settings(self):
         SettingsDialog(self.gui).exec()

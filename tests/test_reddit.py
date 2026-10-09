@@ -506,6 +506,34 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(all(g['is_series'] for g in groups[:3]) and not groups[-1]['is_series'], 'series come first')
         self.assertEqual([p['id'] for p in salvage['posts']], ['t3_1', 't3_2', 't3_3', 't3_4'], 'posts are listed by date')
 
+    def scored(self):
+        def p(i, title, author, score):
+            return {'id': f't3_{i}', 'title': title, 'author': author, 'flair': 'OC', 'created': 1700000000.0 + i, 'html': '<p>x</p>', 'link': '', 'score': score}
+        return [p(1, 'Big Saga 1', 'Alpha', 5000), p(2, 'Big Saga 2', 'Alpha', 4000), p(3, 'Big Saga 3', 'Alpha', 3000),
+                p(4, 'Small Tale 1', 'Bravo', 100), p(5, 'Small Tale 2', 'Bravo', 90), p(6, 'Small Tale 3', 'Bravo', 80),
+                p(7, 'Mid Epic 1', 'Cee', 900), p(8, 'Mid Epic 2', 'Cee', 800), p(9, 'Mid Epic 3', 'Cee', 700), p(10, 'Mid Epic 4', 'Cee', 600),
+                p(11, 'Short Pair 1', 'Dee', 99999), p(12, 'Short Pair 2', 'Dee', 99999), p(13, 'One Shot', 'Eee', 500000)]
+
+    def test_ratings_rank_series_and_top_rated_skips_short_followed_and_single(self):
+        groups = core.group_series(self.scored())
+        self.assertEqual({g['name']: g['score'] for g in groups}['Big Saga'], 12000)
+        self.assertEqual([g['name'] for g in core.rank_groups(groups, 'score')][:4], ['Short Pair', 'Big Saga', 'Mid Epic', 'Small Tale'], 'series first, best rated first')
+        self.assertEqual([g['name'] for g in core.rank_groups(groups, 'posts')][:2], ['Mid Epic', 'Big Saga'], 'or by parts found')
+        top = core.top_series(groups, count=2, min_parts=3)
+        self.assertEqual([g['name'] for g in top], ['Big Saga', 'Mid Epic'], 'two-part series and the single story are not eligible at three parts')
+        self.assertEqual([g['name'] for g in core.top_series(groups, 10, 2)][:3], ['Short Pair', 'Big Saga', 'Mid Epic'])
+        have = [core.series_follow(top[0])]
+        self.assertEqual([g['name'] for g in core.top_series(groups, 2, 3, have)], ['Mid Epic', 'Small Tale'], 'already followed series are skipped')
+        self.assertTrue(core.followed_keys(have) == {('alpha', 'big saga')})
+        self.assertEqual(core.followed_keys([{'name': 'x', 'author_filter': ''}]), set(), 'follows without an author cannot be matched')
+
+    def test_the_api_listing_carries_the_score_and_feeds_do_not(self):
+        listing = json.dumps({'data': {'after': None, 'children': [{'kind': 't3', 'data': {
+            'name': 't3_a', 'title': 'T', 'author': 'w', 'created_utc': 1.0, 'permalink': '/r/x/comments/a/t/',
+            'selftext_html': '<div class="md"><p>Hi.</p></div>', 'score': 1234}}]}})
+        self.assertEqual(core.parse_listing(listing)[0][0]['score'], 1234)
+        self.assertEqual(core.group_series([post(1)])[0]['score'], 0)
+
     def test_follow_for_a_series_matches_its_parts_and_not_other_stories(self):
         group = [g for g in core.group_series(self.posts()) if g['name'] == 'Salvage' and g['author'] == 'Alpha'][0]
         follow = core.series_follow(group)

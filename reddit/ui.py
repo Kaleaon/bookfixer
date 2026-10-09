@@ -3,7 +3,7 @@ import time
 import webbrowser
 
 from qt.core import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
-                     QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, Qt, QVBoxLayout)
+                     QLineEdit, QMessageBox, QPushButton, QRadioButton, QSpinBox, QTableWidget, QTableWidgetItem, Qt, QVBoxLayout)
 
 from calibre_plugins.reddit_follower import core, login
 from calibre_plugins.reddit_follower.config import prefs
@@ -289,6 +289,7 @@ class DiscoverDialog(QDialog):
         super().__init__(parent)
         self.action = action
         self.chosen = None
+        self.chosen_many = []
         self.groups = []
         self.setWindowTitle('Find stories on Reddit')
         self.resize(820, 520)
@@ -305,6 +306,11 @@ class DiscoverDialog(QDialog):
             self.browse.addItem(label, key)
         self.browse.setCurrentIndex(1)
         form.addRow('Order', self.browse)
+        self.pages = QSpinBox()
+        self.pages.setRange(1, 10)
+        self.pages.setValue(3)
+        self.pages.setToolTip('Each page is up to 100 posts and one request to Reddit. Looking through more pages finds more series.')
+        form.addRow('Pages to look through', self.pages)
         self.flair = QLineEdit()
         self.flair.setPlaceholderText('Only this flair, for example OC-FirstOfSeries (official API only; optional)')
         form.addRow('Flair contains', self.flair)
@@ -317,8 +323,8 @@ class DiscoverDialog(QDialog):
         self.message.setWordWrap(True)
         row.addWidget(self.message, 1)
         layout.addLayout(row)
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(['Series or story', 'Author', 'Posts found', 'Parts seen', 'Flair'])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(['Series or story', 'Author', 'Posts found', 'Parts seen', 'Rating', 'Flair'])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -330,11 +336,46 @@ class DiscoverDialog(QDialog):
         self.follow_button.setToolTip('Looks through the author\'s posts for every part, shows what it found, then lets you adjust and follow it')
         self.follow_button.clicked.connect(self.follow_selected)
         row.addWidget(self.follow_button)
+        row.addSpacing(24)
+        row.addWidget(QLabel('Or add the top'))
+        self.top_count = QSpinBox()
+        self.top_count.setRange(1, 25)
+        self.top_count.setValue(5)
+        row.addWidget(self.top_count)
+        row.addWidget(QLabel('series with at least'))
+        self.min_parts = QSpinBox()
+        self.min_parts.setRange(2, 100)
+        self.min_parts.setValue(3)
+        row.addWidget(self.min_parts)
+        row.addWidget(QLabel('parts found'))
+        self.top_button = QPushButton('Add top rated…')
+        self.top_button.setToolTip('Picks the highest rated series in the list above (the rating is the total score of the posts found; '
+                                   'it needs the official API) and follows them all, skipping any you already follow')
+        self.top_button.clicked.connect(self.add_top)
+        row.addWidget(self.top_button)
         row.addStretch(1)
         layout.addLayout(row)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def add_top(self):
+        if not self.groups:
+            self.message.setText('Search or browse first (for example Order: Top of all time), then add the top rated.')
+            return
+        if not any(g.get('score') for g in self.groups):
+            self.message.setText('Ratings need the official API (Settings); the public feeds carry no scores.')
+            return
+        picked = core.top_series(self.groups, self.top_count.value(), self.min_parts.value(), prefs['follows'])
+        if not picked:
+            self.message.setText('No series with that many parts found that you do not already follow. Look through more pages or lower the number of parts.')
+            return
+        text = '\n'.join(f"{g['name']} \u2013 {g['author']}  (rating {g['score']:,}, {len(g['posts'])} parts seen)" for g in picked)
+        if QMessageBox.question(self, 'Follow these series?', f'{len(picked)} highest rated series:\n\n{text}\n\nFollow them all as growing books? '
+                                'Each is collected in full from its author\'s posts, which can take a few minutes.') != QMessageBox.StandardButton.Yes:
+            return
+        self.chosen_many = [core.series_follow(g) for g in picked]
+        self.accept()
 
     def search(self):
         try:
@@ -345,7 +386,7 @@ class DiscoverDialog(QDialog):
         flair = self.flair.text().strip()
         try:
             task = run_task(self, 'Searching Reddit…', lambda t: core.discover(
-                self.action.make_source(t.cancelled), src, flair, cancelled=t.cancelled, progress=lambda msg: setattr(t, 'status', msg)))
+                self.action.make_source(t.cancelled), src, flair, pages=self.pages.value(), cancelled=t.cancelled, progress=lambda msg: setattr(t, 'status', msg)))
         except core.SourceError as exc:
             self.message.setText(str(exc))
             return
@@ -354,13 +395,13 @@ class DiscoverDialog(QDialog):
             return
         if task.result is None:
             return
-        self.groups = task.result
+        self.groups = core.rank_groups(task.result, 'score' if any(g.get('score') for g in task.result) else 'posts')
         self.table.setRowCount(len(self.groups))
         for row, g in enumerate(self.groups):
             nums = sorted(g['numbers'])
             parts = f'{nums[0]}\u2013{nums[-1]}' if len(nums) > 1 else (str(nums[0]) if nums else '')
             for col, text in enumerate([g['name'] + ('' if g['is_series'] else '  (single story)'), g['author'], str(len(g['posts'])), parts,
-                                        ', '.join(sorted(g['flairs']))[:40]]):
+                                        f"{g['score']:,}" if g.get('score') else '', ', '.join(sorted(g['flairs']))[:40]]):
                 self.table.setItem(row, col, QTableWidgetItem(text))
         series = sum(1 for g in self.groups if g['is_series'])
         self.message.setText(f'{series} series and {len(self.groups) - series} single stories among the posts looked through. '

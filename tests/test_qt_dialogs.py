@@ -657,6 +657,57 @@ class RedditPluginTests(QtCase):
         z = zipfile.ZipFile(io.BytesIO(books[0]['formats']['EPUB']))
         self.assertEqual(len([n for n in z.namelist() if n.startswith('OEBPS/s001_')]), 3, 'all three parts, whatever their title style')
 
+    def test_add_top_rated_series_follows_several_at_once(self):
+        core = self.core
+
+        class FeedFake:
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                if '/user/AlphaA/' in url:
+                    return feed(*[entry(f'a{n}', f'Big Saga {n}', f'<p>a{n}</p>', author='/u/AlphaA', stamp=f'2026-10-0{n}T10:00:00+00:00') for n in (3, 2, 1)])
+                if '/user/BravoB/' in url:
+                    return feed(*[entry(f'b{n}', f'Mid Epic {n}', f'<p>b{n}</p>', author='/u/BravoB', stamp=f'2026-10-0{n}T11:00:00+00:00') for n in (4, 3, 2, 1)])
+                return feed()
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        action_module = importlib.import_module(self.package + '.action')
+        self.config.prefs['follows'] = []
+
+        def post(i, title, author, score):
+            return {'id': f't3_{i}', 'title': title, 'author': author, 'flair': 'OC', 'created': 1.7e9 + i, 'html': '<p>x</p>', 'link': '', 'score': score}
+        entries = ([post(n, f'Big Saga {n}', 'AlphaA', 5000 - n) for n in (1, 2, 3)] + [post(10 + n, f'Mid Epic {n}', 'BravoB', 900 - n) for n in (1, 2, 3, 4)]
+                   + [post(20, 'Lone', 'CeeC', 10 ** 6)])
+        dialog = self.ui.DiscoverDialog(None, action)
+        dialog.add_top()
+        self.assertIn('Search or browse first', dialog.message.text())
+        dialog.groups = core.group_series([dict(e, score=0) for e in entries])
+        dialog.add_top()
+        self.assertIn('Ratings need the official API', dialog.message.text())
+        dialog.groups = core.group_series(entries)
+        dialog.top_count.setValue(2)
+        dialog.min_parts.setValue(3)
+        dialog.add_top()
+        self.assertEqual([f['name'] for f in dialog.chosen_many], ['Big Saga', 'Mid Epic'])
+        self.assertEqual(dialog.result(), 1)
+
+        class AutoTop(self.ui.DiscoverDialog):
+            def exec(self):
+                self.groups = core.group_series(entries)
+                self.top_count.setValue(5)
+                self.add_top()
+                return self.result()
+        action_module.DiscoverDialog = AutoTop
+        action.discover()
+        self.assertEqual([f['name'] for f in self.config.prefs['follows']], ['Big Saga', 'Mid Epic'])
+        titles = sorted(b['mi'].title for b in action.gui.db.books.values())
+        self.assertEqual(titles, ['Big Saga', 'Mid Epic'], 'one growing book per series, collected straight away')
+        # a second time there is nothing new to add
+        AutoTop.exec = lambda self: (setattr(self, 'groups', core.group_series(entries)), self.add_top(), self.result())[2]
+        action.discover()
+        self.assertEqual(len(self.config.prefs['follows']), 2)
+
     def test_manage_dialog_lists_and_removes_follows_and_their_cache(self):
         follow = self.core.new_follow('Series', 'u/writer', 'Chapter')
         self.config.prefs['follows'] = [follow]
