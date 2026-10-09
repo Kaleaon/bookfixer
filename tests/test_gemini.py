@@ -159,7 +159,7 @@ class ApiTests(unittest.TestCase):
         t = Scripted(http_error(429, 'slow down', retry_after='7'), http_error(503), reply([]))
         self.assertEqual(engine.generate('k', 'm', 'p', transport=t, sleep=sleeps.append), [])
         self.assertEqual(len(t.calls), 3)
-        self.assertEqual(sleeps[0], 7.0)
+        self.assertEqual(sum(sleeps[:7]), 7.0, 'the 7 second pause Google asked for, taken in one second slices')
 
     def test_gives_up_with_readable_error_without_key(self):
         t = Scripted(*[http_error(429, 'quota')] * 3)
@@ -240,14 +240,95 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(skipped[0].startswith('Book 3:'))
 
     def test_cancel_returns_partial_results(self):
-        flags = iter([False, False, True, True, True])
-        out, skipped = engine.plan_fixes([book(1), book(2)], 'k', batch_size=1, cancelled=lambda: next(flags),
-                                         transport=Scripted(reply([{'id': 1, 'title': 'One', 'confidence': 'high'}]), reply([])))
+        t = Scripted(reply([{'id': 1, 'title': 'One', 'confidence': 'high'}]), reply([]))
+        out, skipped = engine.plan_fixes([book(1), book(2)], 'k', batch_size=1, cancelled=lambda: len(t.calls) >= 1, transport=t)
         self.assertEqual([s['id'] for s in out], [1])
+        self.assertEqual(len(t.calls), 1, 'no request is started after Cancel')
 
     def test_bad_key_stops_the_whole_run(self):
         with self.assertRaises(engine.GeminiError):
             engine.plan_fixes([book(1)], 'k', transport=Scripted(http_error(403, 'API key not valid')))
+
+
+def http_error_with(code, message, details):
+    return urllib.error.HTTPError('https://x', code, 'err', Message(), io.BytesIO(json.dumps({'error': {'message': message, 'details': details}}).encode()))
+
+
+class FreeTierTests(unittest.TestCase):
+    def test_per_minute_limit_waits_the_time_google_names_then_succeeds(self):
+        sleeps = []
+        limited = http_error_with(429, 'Resource exhausted', [{'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '12s'}])
+        t = Scripted(limited, reply([]))
+        engine.generate('k', 'm', 'p', transport=t, sleep=sleeps.append)
+        self.assertEqual(sum(sleeps), 13.0, '12s from RetryInfo plus one second of margin')
+
+    def test_retry_time_in_the_message_text_is_used_too(self):
+        sleeps = []
+        t = Scripted(http_error(429, 'Please retry in 4.2s.'), reply([]))
+        engine.generate('k', 'm', 'p', transport=t, sleep=sleeps.append)
+        self.assertEqual(sum(sleeps[:5]), 5.0)
+
+    def test_daily_quota_is_not_retried(self):
+        daily = http_error_with(429, 'Quota exceeded', [{'@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+                                                         'violations': [{'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier'}]}])
+        t = Scripted(daily, reply([]))
+        with self.assertRaises(engine.QuotaExhausted) as cm:
+            engine.generate('k', 'm', 'p', transport=t, sleep=lambda s: None)
+        self.assertEqual(len(t.calls), 1)
+        self.assertIn('resets once a day', str(cm.exception))
+
+    def test_daily_limit_midway_keeps_what_was_found(self):
+        daily = http_error_with(429, 'Quota exceeded', [{'@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+                                                         'violations': [{'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier'}]}])
+        events = []
+        t = Scripted(reply([{'id': 1, 'title': 'One', 'confidence': 'high'}]), daily)
+        out, skipped = engine.plan_fixes([book(1), book(2), book(3)], 'k', batch_size=1, transport=t, sleep=lambda s: None,
+                                         on_event=lambda kind, **i: events.append(kind))
+        self.assertEqual([s['id'] for s in out], [1])
+        self.assertEqual(skipped, ['2 book(s) not checked: request limit used up'])
+        self.assertEqual(len(t.calls), 2, 'it stops asking once the daily limit is hit')
+        self.assertIn('notice', events)
+
+    def test_requests_are_spaced_out(self):
+        now = [100.0]
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        t = Scripted(reply([]), reply([]), reply([]))
+        engine.plan_fixes([book(1), book(2), book(3)], 'k', batch_size=1, transport=t, min_interval=7, sleep=sleep, clock=lambda: now[0])
+        self.assertEqual(len(t.calls), 3)
+        self.assertEqual(sum(sleeps), 14.0, 'two gaps of 7 seconds, none before the first request')
+
+    def test_no_spacing_by_default(self):
+        sleeps = []
+        engine.plan_fixes([book(1), book(2)], 'k', batch_size=1, transport=Scripted(reply([]), reply([])), sleep=sleeps.append)
+        self.assertEqual(sleeps, [])
+
+    def test_events_describe_the_work(self):
+        events = []
+        b = book(1, title='book 1 - x', tags=['a'], filenames=['x.epub'])
+        engine.plan_fixes([b], 'k', transport=Scripted(reply([{'id': 1, 'title': 'X', 'confidence': 'high', 'reason': 'marker'}])),
+                          on_event=lambda kind, **i: events.append((kind, i)))
+        kinds = [k for k, _ in events]
+        self.assertEqual(kinds, ['sending', 'received', 'answer', 'progress'])
+        self.assertEqual(events[-1][1], {'done': 1, 'total': 1})
+        self.assertTrue(events[2][1]['kept'])
+        line = engine.describe_book(b)
+        self.assertIn('“book 1 - x”', line)
+        self.assertIn('files: x.epub', line)
+        self.assertEqual(engine.describe_change('title', 'a', 'b'), 'title “a” → “b”')
+        self.assertEqual(engine.describe_change('series', ('', None), ('Dune', 2.0)), 'series (none) → Dune #2')
+
+    def test_a_dropped_low_confidence_answer_is_reported(self):
+        events = []
+        engine.plan_fixes([book(1)], 'k', transport=Scripted(reply([{'id': 1, 'title': 'Other', 'confidence': 'low'}])),
+                          on_event=lambda kind, **i: events.append((kind, i)))
+        answer = next(i for k, i in events if k == 'answer')
+        self.assertFalse(answer['kept'])
+        self.assertIn('below your minimum', answer['dropped_why'])
 
 
 class InputTests(unittest.TestCase):

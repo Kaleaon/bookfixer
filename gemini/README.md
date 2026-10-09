@@ -6,7 +6,20 @@ Built with `python build_plugins.py` from the repository root (see *Building and
 
 Asks the Google Gemini API to suggest cleaner metadata for the selected books (or the whole library), shows every suggestion, and applies only the ones you leave ticked.
 
-You need a Google AI API key (free keys from [Google AI Studio](https://aistudio.google.com/apikey) have request limits). Paste it into the window, or set `GEMINI_API_KEY` before starting Calibre.
+You need a Google AI API key. A **free key from [Google AI Studio](https://aistudio.google.com/apikey) is enough**; no billing or prepaid credit is needed. Paste it into the window once (it is remembered), or set `GEMINI_API_KEY` before starting Calibre.
+
+## Using the free tier
+
+Free keys allow only a small number of requests per minute and per day, and Google sets and changes those numbers per model, so the plugin does not assume them:
+
+- **Spacing:** *Seconds between requests* (default 7) leaves a gap between requests so a run does not hit the per-minute limit. Set it to 0 if your key is on a paid plan. Sending more books per request (the default is 15) also means fewer requests.
+- **Per-minute limit hit anyway:** the plugin waits as long as Google's answer says (shown in the activity log, and Cancel still works) and tries again.
+- **Daily limit used up:** the plugin stops asking, **keeps the suggestions already found**, and reports how many books were not checked. Run it again after the daily reset on the remaining books, or pick a lighter model with **List models** (names containing "flash-lite" are usually allowed more requests; check Google's current limits).
+- **Privacy on the free tier:** Google's terms for the free tier may allow it to use what you send to improve its products, unlike paid use. I have not verified the current wording, so read [Google's Gemini API terms](https://ai.google.dev/gemini-api/terms) before sending books you consider private.
+
+## Progress and activity log
+
+While it works the window shows a progress bar (books read, then books answered), what it is doing right now (including seconds waited on Google), and a log with each book as it is read, the exact details being sent to Google for it, and every answer that comes back: ✔ a suggested change, – no change needed, ✖ dropped or failed. **Cancel** stops after the request already in flight.
 
 ## What it can fix
 
@@ -39,4 +52,4 @@ The default model is `gemini-2.5-flash`; **List models** asks Google which model
 
 ## Not verified
 
-The request and response handling is covered by offline tests that replace Google with canned answers (rate limits, blocked prompts, truncated output, bad keys, batches, cancel, numbered titles). It has **not** been run against the live Gemini API (no key was available), so how well the model handles your particular books is untested. The window was run under real Qt (PyQt6, offscreen) against a stand-in library for check, apply and undo, but not inside Calibre; the Calibre calls used (`get_metadata`, `formats`, `format_abspath`, `set_field`, `refresh_ids`) were checked against Calibre's source. Try it on two or three books first.
+The request and response handling is covered by offline tests that replace Google with canned answers (rate limits and Google's retry delay, per-day quota, request spacing, blocked prompts, truncated output, bad keys, batches, cancel, numbered titles). It has **not** been run against the live Gemini API (no key was available), so how well the model handles your particular books is untested. The window was run under real Qt (PyQt6, offscreen) against a stand-in library for check, progress log, cancel, apply and undo, but not inside Calibre; the Calibre calls used (`get_metadata`, `formats`, `format_abspath`, `set_field`, `refresh_ids`) were checked against Calibre's source. Try it on two or three books first.

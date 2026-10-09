@@ -59,8 +59,40 @@ class GeminiError(Exception):
     """A problem talking to the API that the user should read. Never contains the API key."""
 
 
+class QuotaExhausted(GeminiError):
+    """The free (or paid) quota for this model is used up for now; waiting a few seconds will not help."""
+
+
 class Blocked(GeminiError):
     """Google's safety filter refused the request (common for adult fiction)."""
+
+
+# ----------------------------------------------------------------------------------------------------- describing work
+
+def describe_book(book):
+    """One line for the activity log: the data about a book that is sent to Google."""
+    parts = [f"“{book.get('title') or '(no title)'}”", 'by ' + (', '.join(book.get('authors') or []) or '(no author)')]
+    if book.get('series'):
+        index = book.get('series_index')
+        parts.append(f"series {book['series']}" + (f' #{index:g}' if index is not None else ''))
+    if book.get('tags'):
+        parts.append('tags: ' + ', '.join(book['tags'][:6]) + (' …' if len(book['tags']) > 6 else ''))
+    if book.get('languages'):
+        parts.append('language: ' + ', '.join(book['languages']))
+    if book.get('filenames'):
+        parts.append('files: ' + ', '.join(book['filenames']))
+    if book.get('excerpt'):
+        parts.append(f"+ {len(book['excerpt'])} characters of opening text")
+    return ' | '.join(parts)
+
+
+def describe_change(field, old, new):
+    if field == 'series':
+        fmt = lambda v: (f'{v[0]} #{v[1]:g}' if v[0] and v[1] is not None else v[0]) or '(none)'
+        return f'series {fmt(old)} → {fmt(new)}'
+    if isinstance(new, list):
+        return f"{field} {', '.join(old) or '(none)'} → {', '.join(new)}"
+    return f'{field} “{old}” → “{new}”'
 
 
 # ---------------------------------------------------------------------------------------------------------------- API
@@ -77,32 +109,59 @@ def _get(url, headers, timeout):
         return response.read()
 
 
-def _error_message(exc):
+def _error_info(exc):
+    """(message, seconds Google says to wait or None, True when it is a per-day quota) from an HTTP error answer."""
     try:
-        data = json.loads(exc.read().decode('utf-8', 'replace'))
-        return data['error']['message']
+        data = json.loads(exc.read().decode('utf-8', 'replace'))['error']
     except Exception:
-        return exc.reason if isinstance(exc.reason, str) else f'HTTP {exc.code}'
+        return (exc.reason if isinstance(exc.reason, str) else f'HTTP {exc.code}'), None, False
+    message = str(data.get('message') or f'HTTP {exc.code}')
+    retry, daily = None, False
+    for detail in data.get('details') or []:
+        kind = str(detail.get('@type', ''))
+        if kind.endswith('RetryInfo'):
+            m = re.match(r'([\d.]+)s', str(detail.get('retryDelay', '')))
+            retry = float(m.group(1)) if m else retry
+        elif kind.endswith('QuotaFailure'):
+            daily = daily or any('perday' in str(v.get('quotaId', '')).lower() for v in detail.get('violations') or [])
+    if retry is None:
+        m = re.search(r'retry in ([\d.]+)s', message)
+        retry = float(m.group(1)) if m else None
+    return message, retry, daily
 
 
-def _request(method, url, api_key, body=None, retries=4, timeout=120, transport=None, sleep=time.sleep, cancelled=lambda: False):
+def _request(method, url, api_key, body=None, retries=4, timeout=120, transport=None, sleep=time.sleep, cancelled=lambda: False,
+             notify=lambda text: None):
     """One API call with the retry rules: rate limits and server errors are retried with a growing pause."""
     headers = {'x-goog-api-key': api_key, 'Content-Type': 'application/json', 'User-Agent': 'calibre-gemini-library-fixer'}
     send = transport or ((lambda u, h, b, t: _post(u, h, b, t)) if method == 'POST' else (lambda u, h, b, t: _get(u, h, t)))
     delay = 3.0
+
+    def nap(seconds, why):
+        """Pause before a retry in one-second slices so Cancel is noticed, and say so, so the window is not silent."""
+        notify(f'{why}; waiting {seconds:.0f}s before trying again')
+        left = seconds
+        while left > 0 and not cancelled():
+            sleep(min(1.0, left))
+            left -= 1.0
+
     for attempt in range(retries + 1):
         if cancelled():
             raise GeminiError('Cancelled')
         try:
             return json.loads(send(url, headers, body, timeout).decode('utf-8'))
         except urllib.error.HTTPError as exc:
-            message = _error_message(exc)
+            message, advised, daily = _error_info(exc)
+            if exc.code == 429 and (daily or (advised is not None and advised > 120)):
+                raise QuotaExhausted(f'The request limit for this model is used up for now (Google: {message}). Free keys have a small daily '
+                                     f'allowance that resets once a day; you can wait, pick a lighter model (a "flash-lite" one), or '
+                                     f'turn on billing for your key. Results found so far are kept.') from None
             if exc.code in RETRY_STATUS and attempt < retries:
                 try:
                     wait = min(float(exc.headers.get('Retry-After')), 120)
                 except (TypeError, ValueError, AttributeError):
-                    wait = delay
-                sleep(wait)
+                    wait = min(advised + 1, 120) if advised is not None else delay
+                nap(wait, 'Google asked for a pause' if exc.code == 429 else f'Google had a temporary problem ({exc.code})')
                 delay *= 2
                 continue
             if exc.code in (400, 403) and 'API key' in message:
@@ -112,7 +171,7 @@ def _request(method, url, api_key, body=None, retries=4, timeout=120, transport=
             raise GeminiError(f'Google returned an error ({exc.code}): {message}') from None
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
             if attempt < retries:
-                sleep(delay)
+                nap(delay, 'Could not reach Google')
                 delay *= 2
                 continue
             reason = getattr(exc, 'reason', exc)
@@ -299,26 +358,56 @@ def is_big_change(changes):
 # ------------------------------------------------------------------------------------------------------------- driver
 
 def plan_fixes(books, api_key, model=DEFAULT_MODEL, fields=FIELDS, min_confidence='medium', batch_size=15,
-               tags_may_be_removed=False, progress=lambda text: None, cancelled=lambda: False, **kw):
+               tags_may_be_removed=False, progress=lambda text: None, cancelled=lambda: False, on_event=lambda kind, **info: None,
+               min_interval=0, sleep=time.sleep, clock=time.monotonic, **kw):
     """Returns (suggestions, skipped). A suggestion is {'id', 'title', 'changes', 'confidence', 'reason', 'big'}; skipped is a
-    list of 'title: why' strings for books that could not be checked. On cancel, returns what was finished so far."""
+    list of 'title: why' strings for books that could not be checked. On cancel, returns what was finished so far.
+
+    on_event(kind, **info) reports the work as it happens: 'sending' (books=batch), 'received' (count), 'answer' (book, changes,
+    confidence, reason, kept, dropped_why), 'notice' (text), 'skipped' (text), 'progress' (done, total)."""
     suggestions, skipped = [], []
+    state = {'done': 0, 'last': None}
     threshold = CONFIDENCE.get(min_confidence, 1)
     by_id = {b['id']: b for b in books}
+    total = len(books)
+
+    def finish(count):
+        state['done'] += count
+        on_event('progress', done=state['done'], total=total)
+
+    def pace():
+        """Free keys allow only a few requests a minute, so leave a gap between requests instead of running into the limit."""
+        if min_interval and state['last'] is not None:
+            wait = state['last'] + min_interval - clock()
+            if wait > 2:
+                on_event('notice', text=f'Pausing {wait:.0f}s between requests to stay inside the free-tier limit')
+            while wait > 0 and not cancelled():
+                sleep(min(1.0, wait))
+                wait -= 1.0
+        state['last'] = clock()
 
     def ask(batch):
+        pace()
+        if cancelled():
+            return
+        on_event('sending', books=batch)
         try:
-            answers = generate(api_key, model, build_prompt(batch), cancelled=cancelled, **kw)
+            answers = generate(api_key, model, build_prompt(batch), cancelled=cancelled, sleep=sleep,
+                               notify=lambda t: on_event('notice', text=t), **kw)
         except Blocked as exc:
             if len(batch) == 1:
                 skipped.append(f"{batch[0].get('title') or batch[0]['id']}: {exc}")
+                on_event('skipped', text=skipped[-1])
+                finish(1)
                 return
+            on_event('notice', text=f'{exc} Splitting these {len(batch)} books to find the one responsible.')
             half = len(batch) // 2  # find the book that trips the filter instead of losing the whole batch
             ask(batch[:half])
             ask(batch[half:])
             return
         wanted = {b['id'] for b in batch}
         seen = set()
+        on_event('received', count=len(answers))
         for raw in answers:
             if not isinstance(raw, dict) or raw.get('id') not in wanted or raw['id'] in seen:
                 continue  # an id we did not ask about, or a repeat, is ignored
@@ -326,11 +415,16 @@ def plan_fixes(books, api_key, model=DEFAULT_MODEL, fields=FIELDS, min_confidenc
             book = by_id[raw['id']]
             confidence = str(raw.get('confidence') or 'low').lower()
             changes = sanitize(book, raw, fields, tags_may_be_removed)
-            if changes and CONFIDENCE.get(confidence, 0) >= threshold:
+            enough = CONFIDENCE.get(confidence, 0) >= threshold
+            on_event('answer', book=book, changes=changes, confidence=confidence, reason=_clean(raw.get('reason'), 300),
+                     kept=bool(changes) and enough, dropped_why=None if (enough or not changes) else f'{confidence} confidence is below your minimum')
+            if changes and enough:
                 suggestions.append({'id': book['id'], 'title': book.get('title') or '', 'changes': changes, 'confidence': confidence,
                                     'reason': _clean(raw.get('reason'), 300), 'big': is_big_change(changes)})
         for missing in wanted - seen:
             skipped.append(f"{by_id[missing].get('title') or missing}: no answer from the model")
+            on_event('skipped', text=skipped[-1])
+        finish(len(batch))
 
     size = max(1, int(batch_size))
     # Books by the same author go in the same request, so volumes of one series can be recognised together.
@@ -341,6 +435,12 @@ def plan_fixes(books, api_key, model=DEFAULT_MODEL, fields=FIELDS, min_confidenc
         progress(f'Asking Gemini… {min(start + size, len(books))} of {len(books)} books')
         try:
             ask(books[start:start + size])
+        except QuotaExhausted as exc:
+            left = total - state['done']
+            skipped.append(f'{left} book(s) not checked: request limit used up')
+            on_event('notice', text=str(exc))
+            on_event('skipped', text=skipped[-1])
+            break
         except GeminiError as exc:
             if str(exc) == 'Cancelled':
                 break

@@ -1,9 +1,12 @@
 import os
+import queue
+import threading
+import time
 
 from calibre.gui2 import error_dialog, info_dialog, question_dialog
 from calibre.gui2.actions import InterfaceAction
 from qt.core import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                     QRadioButton, QSpinBox, Qt, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
+                     QPlainTextEdit, QProgressBar, QRadioButton, QSpinBox, Qt, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
 from calibre_plugins.gemini_library_fixer import engine
 from calibre_plugins.gemini_library_fixer.config import prefs
@@ -34,7 +37,7 @@ class GeminiFixerAction(InterfaceAction):
         self.qaction.triggered.connect(self.show_dialog)
 
     # -- reading and writing the library ------------------------------------------------------------------------------
-    def books_for(self, ids, with_excerpt):
+    def books_for(self, ids, with_excerpt, on_book=lambda index, total, book: None, should_stop=lambda: False):
         db = self.gui.current_db.new_api
         books = []
         for i, book_id in enumerate(ids):
@@ -52,8 +55,10 @@ class GeminiFixerAction(InterfaceAction):
                           'series': mi.series or '', 'series_index': mi.series_index if mi.series else None,
                           'tags': list(mi.tags or []), 'languages': list(mi.languages or []), 'publisher': mi.publisher or '',
                           'filenames': names, 'excerpt': excerpt})
-            if i % 50 == 0:
-                QApplication.processEvents()
+            on_book(i + 1, len(ids), books[-1])
+            QApplication.processEvents()  # keeps the window (and its Cancel button) alive while a big library is read
+            if should_stop():
+                break
         return books
 
     def write_changes(self, items):
@@ -136,7 +141,7 @@ class GeminiFixerAction(InterfaceAction):
         row.addWidget(QLabel('Google AI API key:'))
         key = QLineEdit(prefs['api_key'])
         key.setEchoMode(QLineEdit.EchoMode.Password)
-        key.setPlaceholderText('From https://aistudio.google.com/apikey  (or set GEMINI_API_KEY)')
+        key.setPlaceholderText('Free key from https://aistudio.google.com/apikey — no billing needed (or set GEMINI_API_KEY)')
         row.addWidget(key, 1)
         layout.addLayout(row)
         row = QHBoxLayout()
@@ -174,13 +179,37 @@ class GeminiFixerAction(InterfaceAction):
         batch.setRange(1, 50)
         batch.setValue(int(prefs['batch_size']))
         row.addWidget(batch)
+        row.addWidget(QLabel('Seconds between requests:'))
+        interval = QSpinBox()
+        interval.setRange(0, 120)
+        interval.setValue(int(prefs['min_interval']))
+        interval.setToolTip('Free Google AI keys allow only a few requests per minute. 7 keeps under about 8 a minute; use 0 with a paid key.')
+        row.addWidget(interval)
         row.addStretch(1)
         layout.addLayout(row)
+
+        row = QHBoxLayout()
+        bar = QProgressBar()
+        bar.setRange(0, 1)
+        bar.setValue(0)
+        bar.setFormat('%v of %m')
+        row.addWidget(bar, 1)
+        stop_btn = QPushButton('Cancel')
+        stop_btn.setEnabled(False)
+        row.addWidget(stop_btn)
+        layout.addLayout(row)
+        phase = QLabel('Idle.')
+        layout.addWidget(phase)
+        activity = QPlainTextEdit()
+        activity.setReadOnly(True)
+        activity.setMaximumBlockCount(5000)
+        activity.setPlaceholderText('What is happening shows up here: each book as it is read, the exact data sent to Gemini, and every answer that comes back.')
+        layout.addWidget(activity, 2)
 
         tree = QTreeWidget()
         tree.setHeaderLabels(['Suggested change', 'Why'])
         tree.setColumnWidth(0, 520)
-        layout.addWidget(tree, 1)
+        layout.addWidget(tree, 3)
         status = QLabel('Press Check books to ask Gemini. Big changes (a very different title or author) are left unticked.')
         status.setWordWrap(True)
         layout.addWidget(status)
@@ -212,6 +241,21 @@ class GeminiFixerAction(InterfaceAction):
             prefs['excerpt'] = excerpt.isChecked()
             prefs['min_confidence'] = confidence.currentText()
             prefs['batch_size'] = batch.value()
+            prefs['min_interval'] = interval.value()
+
+        cancel_flag = threading.Event()
+
+        def log(text):
+            activity.appendPlainText(f'{time.strftime("%H:%M:%S")}  {text}')
+
+        def set_busy(busy):
+            for w in (check_btn, apply_btn, undo_btn, models_btn):
+                w.setEnabled(not busy and (w is not apply_btn) and (w is not undo_btn or bool(prefs['undo'])))
+            stop_btn.setEnabled(busy)
+            buttons.button(QDialogButtonBox.StandardButton.Close).setEnabled(not busy)
+
+        stop_btn.clicked.connect(lambda: (cancel_flag.set(), log('Cancel pressed; stopping after the current step.')))
+        dialog.finished.connect(lambda _result: cancel_flag.set())
 
         def do_list_models():
             save_prefs()
@@ -235,16 +279,103 @@ class GeminiFixerAction(InterfaceAction):
             ids = selected if scope_selected.isChecked() else sorted(self.gui.current_db.new_api.all_book_ids())
             if len(ids) > 100 and not question_dialog(dialog, 'Gemini', f'{len(ids)} books will be sent to Google in batches of {batch.value()}. Continue?'):
                 return
-            books = self.books_for(ids, excerpt.isChecked())
-            task = run_task(dialog, 'Asking Gemini…', lambda t: engine.plan_fixes(
-                books, api_key(), model.currentText().strip() or engine.DEFAULT_MODEL, chosen_fields(), confidence.currentText(),
-                batch.value(), tags_remove.isChecked(), progress=lambda text: setattr(t, 'status', text), cancelled=t.cancelled))
             tree.clear()
             apply_btn.setEnabled(False)
-            if task.error:
-                return error_dialog(dialog, 'Gemini', str(task.error), show=True)
-            suggestions, skipped = task.result or ([], [])
-            cancelled_note = ' (cancelled early)' if task.cancelled() else ''
+            activity.clear()
+            cancel_flag.clear()
+            set_busy(True)
+            try:
+                log(f'Reading {len(ids)} book(s) from your library' + (' (including the opening text of EPUBs)' if excerpt.isChecked() else '') + '…')
+                bar.setRange(0, max(1, len(ids)))
+                bar.setValue(0)
+
+                def on_book(index, total, book):
+                    bar.setValue(index)
+                    phase.setText(f'Reading your library: book {index} of {total}')
+                    log(f'  read {index}/{total}: {engine.describe_book(book)}')
+
+                books = self.books_for(ids, excerpt.isChecked(), on_book, cancel_flag.is_set)
+                if cancel_flag.is_set():
+                    log('Cancelled while reading. Nothing was sent to Google.')
+                    return finish_run(None, len(books))
+                result, error = ask_gemini(books)
+            finally:
+                set_busy(False)
+            return finish_run(result, len(books), error)
+
+        def ask_gemini(books):
+            """Runs the API calls in a thread; this loop shows what they report and keeps the window responsive."""
+            messages = queue.Queue()
+            box = {}
+            total = len(books)
+            log(f'Sending {total} book(s) to Gemini ({model.currentText().strip() or engine.DEFAULT_MODEL}), {batch.value()} per request. Only the details shown above leave your computer.')
+            bar.setRange(0, max(1, total))
+            bar.setValue(0)
+
+            def work():
+                try:
+                    box['result'] = engine.plan_fixes(
+                        books, api_key(), model.currentText().strip() or engine.DEFAULT_MODEL, chosen_fields(), confidence.currentText(),
+                        batch.value(), tags_remove.isChecked(), cancelled=cancel_flag.is_set, min_interval=interval.value(),
+                        on_event=lambda kind, **info: messages.put((kind, info)))
+                except Exception as exc:  # shown to the user by the caller
+                    box['error'] = exc
+
+            worker = threading.Thread(target=work, daemon=True)
+            worker.start()
+            waiting = {'since': None, 'count': 0}
+
+            def handle(kind, info):
+                if kind == 'sending':
+                    batch_books = info['books']
+                    waiting['since'], waiting['count'] = time.time(), len(batch_books)
+                    log(f'→ Sending {len(batch_books)} book(s) to Gemini:')
+                    for b in batch_books:
+                        log(f'     {engine.describe_book(b)}')
+                elif kind == 'received':
+                    log(f'← Gemini answered after {time.time() - (waiting["since"] or time.time()):.0f}s ({info["count"]} entries)')
+                    waiting['since'] = None
+                elif kind == 'answer':
+                    book, changes = info['book'], info['changes']
+                    name = f"“{book.get('title') or book['id']}”"
+                    if info['kept']:
+                        log(f"   ✔ {name} [{info['confidence']}]: " + '; '.join(engine.describe_change(f, o, n) for f, (o, n) in changes.items())
+                            + (f" — {info['reason']}" if info['reason'] else ''))
+                    elif changes:
+                        log(f"   ✖ {name}: suggestion dropped, {info['dropped_why']}")
+                    else:
+                        log(f'   – {name}: no change needed')
+                elif kind == 'notice':
+                    log(f"⚠ {info['text']}")
+                elif kind == 'skipped':
+                    log(f"✖ {info['text']}")
+                elif kind == 'progress':
+                    bar.setValue(info['done'])
+
+            while worker.is_alive() or not messages.empty():
+                while not messages.empty():
+                    handle(*messages.get())
+                if cancel_flag.is_set():
+                    phase.setText('Cancelling… waiting for the request in progress to come back')
+                elif waiting['since'] is not None:
+                    phase.setText(f"Waiting for Gemini… {time.time() - waiting['since']:.0f}s so far ({waiting['count']} books in this request; usually 5–60s)")
+                else:
+                    phase.setText('Working…')
+                QApplication.processEvents()
+                time.sleep(0.05)
+            return box.get('result'), box.get('error')
+
+        def finish_run(result, count, error=None):
+            phase.setText('Idle.')
+            if error:
+                log(f'✖ Stopped: {error}')
+                return error_dialog(dialog, 'Gemini', str(error), show=True)
+            if result is None:
+                status.setText('Cancelled before anything was sent.')
+                return
+            suggestions, skipped = result
+            cancelled_note = ' (cancelled early)' if cancel_flag.is_set() else ''
+            log(f'Done: {len(suggestions)} of {count} book(s) have suggested changes{cancelled_note}. Tick what you want below, then press Apply.')
             for s in suggestions:
                 top = QTreeWidgetItem(tree, [s['title'] or f"book {s['id']}", f"{s['confidence']} confidence" + ('; BIG CHANGE' if s['big'] else '')])
                 top.setFlags(top.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
@@ -258,7 +389,7 @@ class GeminiFixerAction(InterfaceAction):
                     child.setData(0, Qt.ItemDataRole.UserRole + 1, (old, new))
                 top.setCheckState(0, want)
                 top.setExpanded(True)
-            text = f'{len(suggestions)} of {len(books)} book(s) have suggested changes{cancelled_note}.'
+            text = f'{len(suggestions)} of {count} book(s) have suggested changes{cancelled_note}.'
             if skipped:
                 text += f' {len(skipped)} could not be checked: ' + '; '.join(skipped[:3]) + (' …' if len(skipped) > 3 else '')
             status.setText(text)

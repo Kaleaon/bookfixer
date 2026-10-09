@@ -9,3 +9,4 @@ prefs.defaults['batch_size'] = 15
 prefs.defaults['tags_remove'] = False
 prefs.defaults['excerpt'] = False
 prefs.defaults['undo'] = {}
+prefs.defaults['min_interval'] = 7
