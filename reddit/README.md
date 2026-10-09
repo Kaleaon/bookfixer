@@ -40,6 +40,60 @@ Register the app at reddit.com/prefs/apps with the redirect uri exactly `http://
 
 Whether Reddit currently lets you create such an app without approval, and how it treats this login, is not something I could check; this flow is written to Reddit's documented OAuth2 and tested against a stand-in server, not the real service.
 
+## Finding stories and whole series (r/HFY and similar)
+
+**Reddit stories → Find stories…** (also a button in the followed-stories window) searches or browses a subreddit and groups what it finds into series:
+
+- Choose the subreddit (HFY by default), optional search words, and an order: best match for the words, top of all time / this year / this month, or newest. *Flair contains* narrows to a flair such as `OC-FirstOfSeries` (official API only).
+- Posts are grouped by **author and title name**, reading part numbers in the shapes HFY uses: `Name 14`, `Name, Part 14`, `Name - Chapter 14`, `Name (14)`, `Name #14`, `Name VIII` (capital Roman numerals), with `[OC]` or `[Universe]` tags in front ignored. Two different part numbers, or a *series* flair on two posts, make it a series; the rest are listed as single stories. The same name by two authors stays two series.
+- **Follow the whole series…** then reads the author's own posts back through their history (up to 3,000 posts at a time) and shows how many parts it found and from when to when, with the first and last titles. If you go on, the usual Add dialog opens filled in (the author, and a title filter that matches the name with any tags in front) so you can change it, and the series is collected as one growing book.
+
+Checked on the real r/HFY: the top-of-all-time list showed 121 parts of *The Nature of Predators* (SpacePaladin15), and following it found 284 (2022-04-11 to 2025-01-04, ending "2-99 [Final]"); *Salvage* (Rantarian, Jenkinsverse) showed 86 and following found 89, 2014 to 2020, from the first post to "Chapter 100" (11 numbers have no post under that name, probably titled differently or posted by someone else).
+
+**Adding the top rated.** The results are listed best rated first, with a *Rating* column (the total score of that series' posts that were found; ratings need the official API, the public feeds carry no scores). Choose *Order: Top of all time* (or this year, or this month), set *Pages to look through* (each is up to 100 posts and one request), then **Add top rated…**: it picks the highest rated real series with at least the number of parts you set (3 by default), skips any you already follow, shows the list for you to confirm, and follows them all, each collected in full from its author's posts (this can take a few minutes; Cancel keeps what was read and the next check carries on). On the real r/HFY top of all time (500 posts looked through) the leaders were *The Nature of Predators* (rating about 834,000, 139 parts seen), *Why Humans Avoid War* (about 211,000, 27 parts), *A job for a deathworlder*, *The New Species* and *Jennifer is NOT an Eldritch Horror*. A series' rating counts only the posts that fall inside the pages looked through, so a series with a few huge posts can outrank a longer, steadier one.
+
+What it cannot do: it knows a series only by its author and title, so parts retitled partway (as Out of Cruel Space was) need the *Title contains* box adjusted by hand; a series with tag-only titles such as `[Jenkinsverse] 5.` shows up as pieces; and parts posted by several authors are not joined. Search and browse use Reddit's search, which returns only the first pages (the dialog looks through three).
+
+## Chapter titles and author's notes from the post itself
+
+Out of Cruel Space opens every post with its chapter title, such as `The Pirates & The Bounty Hunters` (Part 59), `Capes and Conundrums` or `Danger Zone!`, followed by an empty line. Tick *The first line of each post is its chapter title* (on in the Quick start) and the plugin:
+
+- names the chapter from it: `Chapter 059 – The Pirates & The Bounty Hunters` with the chapter index, `Out of Cruel Space, Part 59 – The Pirates & The Bounty Hunters` without it;
+- takes the line out of the text so it is not printed twice, and drops the empty zero-width paragraphs (these blank paragraphs are removed from every chapter now);
+- drops comment-race markers such as `~First~`, and turns a note to readers in brackets, for example `(I am so sorry, my brain clunked HARD and remained BLANK today.)`, into a boxed **Author's note** at the top of the chapter. The author's own comment (the optional setting above) is a boxed **Author's comment** at the end.
+
+A line counts as the title only if it is short (80 characters or fewer), does not end like a sentence, is not a quotation and has no brackets; a title ending in `!` must be capitalised like a title (`Danger Zone!`, but not `Run!`). Checked on the real series: 1,748 of 1,802 posts have a title line (the first ~45 chapters mostly have none and keep their `Part N` name), 76 distinct titles, 328 posts with a bracketed note. The titles repeat (`A Scion of Many Worlds` heads 181 chapters, `The Bounty Hunters` 172), so they work as a storyline name more than a unique chapter title; the index's chapter number still tells chapters apart. A note that shares a paragraph with a marker (`~First~ (note)`) is left in the text, and the box styling depends on your e-reader supporting the book's stylesheet.
+
+## Chapter index (a public spreadsheet)
+
+*Chapter index* in the Add/Edit dialog takes the address of a public Google Sheet that lists a series' chapters with the columns **Date, Author, Chapter** and (optionally) **Note**. The plugin reads it (at most once a day, as CSV; the sheet must be shared so anyone with the link can view it) and:
+
+- names each collected chapter from it, such as `Chapter 001 – Pirates` or `Into A Wider Galaxy, Chapter 010 – AAA` (the Note column is the storyline), instead of `…Part 1010`;
+- pairs posts with rows by chapter number and date, then by posting time, so **mistitled posts are fixed** (the real Out of Cruel Space has `Part 1010` for Chapter 10 and `Part 365` for Chapter 635);
+- tells you in the status column when the index lists a chapter Reddit has no post for (a missing chapter) or the other way round. A post the index does not list yet keeps its own title.
+
+The Quick start for Out of Cruel Space includes the community's sheet (an extension of Kerserv's archive, which the author links in his comments). Checked against it: 1,800 rows for KyleKKent, every one matched to a Reddit post, 65 storylines, and two Reddit posts not yet in the sheet (the newest chapter and a second post numbered 726). The same sheet lists 2,823 rows in all because it also covers other authors' side stories and fan works (for example 695 by KamchatkasRevenge), which is likely where a count above 2,000 comes from; the plugin follows only the author you name. If the sheet cannot be read the older copy is kept and the status says why.
+
+## Long series, and comments
+
+Tried against the real history of Out of Cruel Space (by u/KyleKKent) with the official API: the author's post list reaches back to Part 1 (2021-05-19) and held 1,802 chapter posts, collected in about 40 seconds. The series was renamed part-way, from "Out of Cruel Space, Part N" (Parts 1-999) to "OOCS, Into A Wider Galaxy, Part N" (Parts 1-800 so far), so the Quick start now follows both names (but not the separate side stories). Earlier versions only matched the old name inside the newest 1,000 posts, which is how a book could stop at a couple of hundred chapters. A first check now reads back up to 30 pages at a time and keeps going on the next check until it reaches the beginning; editing a follow's filters makes it read back again.
+
+If you counted more than about 1,800 chapters, I could not find the difference: the listing ends at 1,802 matching posts, with a few numbers skipped (for example Part 760 of the first run). Posts Reddit does not list, or counting side stories, could explain it; I do not know.
+
+**Comments.** The author puts one top-level comment under each chapter: a preface on Part 1, later mostly Patreon and book links, a blurb for other stories, "most relevant chapters" links and fan links, and sometimes a real note (a schedule change, for example). Reader comments are discussion and are not included. Tick *Also keep the author's own comment* in the Add/Edit dialog to append it under each chapter as "Author's comment". It needs the official API and costs one request per chapter, so a long series is filled in batches of 300 chapters per check (about ten minutes each, newest first), with the next batch due again within 15 minutes. Other comments mention chapters only by link (a bot lists earlier parts); I found no separate chapter names in them.
+
+## A subreddit of stand-alone stories (r/gayincest_stories and similar)
+
+Some communities are not one author's series but many authors posting one story per post. In the Add/Edit dialog choose **A separate book for each post** (the Quick start has an entry for r/gayincest_stories). Then:
+
+- Each matching post becomes its own book, with the post's author as the book's author and its date as the publication date.
+- The post's **flair** becomes tags: `TRUE STORY - Uncle` gives the tags `TRUE STORY` and `Uncle`; `FICTION - Dad/In-Law/Step` gives `FICTION` and `Dad/In-Law/Step`. Use *Flair contains* to take only some (for example `FICTION`, or `re:Uncle|Cousin`). Flair is only available through the official API, not the public feed.
+- A title like `The Lake House, Part 3` joins the Calibre series `The Lake House` as number 3; the other parts are matched by the same wording before "Part". Parts whose titles word the start differently are not grouped.
+- The first check takes only the **newest 25** matching posts, not the community's backlog, and at most 50 new books are added per check (the rest wait for the next one). Edited posts become a fresh book.
+- Posts whose title states an age under 18 (such as `[16M]`, `(17)` or `15 yo`) are skipped. This only reads the title: it cannot know ages that are not in the title, and a bracketed number that is not an age also counts, so it errs on the side of skipping. Whether every post in a large community follows its rules is something the plugin cannot check; the Add dialog's *Posted by* box can restrict a follow to authors you trust.
+
+What I looked at: the community's public listing, with the official API (it is marked 18+, about 96,000 members, not quarantined). Of the newest 100 posts every one was a text post with flair, from 59 different authors, with a median length of about 4,600 characters; the plugin's own run on the newest 25 produced 25 books, 11 of them in 9 Calibre series. I did not read any story text.
+
 ## Two ways to read Reddit, and what is known about each
 
 | | Public feeds (default) | Official API (your own credentials) |

@@ -494,12 +494,25 @@ class RedditPluginTests(QtCase):
         self.assertEqual(dialog.preset.count(), 1 + len(self.core.PRESETS))
         dialog.preset.setCurrentIndex(1)
         self.assertEqual((dialog.name.text(), dialog.source.text(), dialog.title_filter.text(), dialog.author_filter.text()),
-                         ('Out of Cruel Space', 'u/KyleKKent', 'Out of Cruel Space', 'KyleKKent'))
+                         ('Out of Cruel Space', 'u/KyleKKent', self.core.PRESETS[0]['title_filter'], 'KyleKKent'))
         self.assertIn('Will follow u/KyleKKent', dialog.message.text())
         dialog.try_accept()
         self.assertEqual(dialog.result(), 1)
         follow = dialog.result_follow()
         self.assertEqual((follow['name'], follow['source']['user'], follow['author_filter']), ('Out of Cruel Space', 'KyleKKent', 'KyleKKent'))
+        self.assertFalse(follow['author_note'], 'author comments are opt-in')
+        self.assertIn('docs.google.com/spreadsheets', follow['index_url'], 'the preset brings the public chapter index')
+        self.assertTrue(follow['title_from_body'], 'the preset names chapters from the title line each post opens with')
+        bad = self.ui.FollowDialog(None)
+        bad.source.setText('u/KyleKKent')
+        bad.index_url.setText('https://example.com/nope')
+        bad.try_accept()
+        self.assertIn('Google Sheets', bad.message.text())
+        self.assertEqual(bad.result(), 0, 'a bad index address does not close the dialog')
+        self.assertTrue(self.core.matches({'title': 'OOCS, Into A Wider Galaxy, Part 800', 'author': 'KyleKKent', 'html': '<p>x</p>'}, follow),
+                        'the preset keeps following after the series was renamed')
+        dialog.author_note.setChecked(True)
+        self.assertTrue(dialog.result_follow()['author_note'])
         edit = self.ui.FollowDialog(None, follow)
         self.assertFalse(hasattr(edit, 'preset'), 'editing an existing follow offers no presets')
 
@@ -549,6 +562,151 @@ class RedditPluginTests(QtCase):
         self.assertEqual(self.config.prefs['refresh_token'], '')
         self.assertEqual(dialog.login_status.text(), 'Not logged in')
         self.assertTrue(any(path == '/revoke' for path, _, _ in stand.StandIn.log))
+
+    def test_each_post_becomes_its_own_book_and_the_dialog_offers_it(self):
+        core = self.core
+        dialog = self.ui.FollowDialog(None)
+        preset_index = 1 + [i for i, p in enumerate(core.PRESETS) if p.get('layout') == 'each'][0]
+        dialog.preset.setCurrentIndex(preset_index)
+        dialog.flair_filter.setText('FICTION')
+        dialog.try_accept()
+        made = dialog.result_follow()
+        self.assertEqual((made['layout'], made['flair_filter'], made['source']['subreddit']), ('each', 'FICTION', 'gayincest_stories'))
+        edit = self.ui.FollowDialog(None, made)
+        self.assertEqual((edit.layout_box.currentData(), edit.flair_filter.text()), ('each', 'FICTION'))
+
+        class FeedFake:
+            posts = []
+
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                return feed(*FeedFake.posts)
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        db = action.gui.db
+        follow = core.new_follow('Stories', 'r/gayincest_stories', layout='each')
+        self.config.prefs['follows'] = [follow]
+        FeedFake.posts = [entry('c', 'Weekend away, Part 2', '<p>two</p>'), entry('b', 'Camping [16M] and [40M]', '<p>skipped</p>'),
+                          entry('a', 'Weekend away, Part 1', '<p>one</p>')]
+        action.check_now([follow])
+        titles = sorted((b['mi'].title, b['mi'].series, b['mi'].series_index) for b in db.books.values())
+        self.assertEqual(titles, [('Weekend away, Part 1', 'Weekend away', 1.0), ('Weekend away, Part 2', 'Weekend away', 2.0)])
+        self.assertTrue(all(b['formats'].get('EPUB') for b in db.books.values()))
+        writes = db.writes
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertEqual((len(db.books), db.writes), (2, writes), 'nothing is added twice')
+        FeedFake.posts.insert(0, entry('d', 'Another story', '<p>three</p>'))
+        action.check_now(list(self.config.prefs['follows']))
+        self.assertEqual(len(db.books), 3)
+
+    def test_find_stories_groups_series_and_follows_the_whole_thing(self):
+        core = self.core
+
+        class FeedFake:
+            urls = []
+
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                FeedFake.urls.append(url)
+                return feed(entry('s3', 'Saga of Ash 3', '<p>three</p>', author='/u/Writer', stamp='2026-10-03T10:00:00+00:00'),
+                            entry('s1', 'Saga of Ash 1', '<p>one</p>', author='/u/Writer', stamp='2026-10-01T10:00:00+00:00'),
+                            entry('s2', '[OC] Saga of Ash, Part 2', '<p>two</p>', author='/u/Writer', stamp='2026-10-02T10:00:00+00:00'),
+                            entry('x1', 'A lone tale', '<p>alone</p>', author='/u/Other', stamp='2026-10-04T10:00:00+00:00'))
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        action_module = importlib.import_module(self.package + '.action')
+
+        class AutoFollow(self.ui.FollowDialog):
+            def exec(self):
+                self.try_accept()
+                return self.result()
+        self.ui.FollowDialog = AutoFollow
+        dialog = self.ui.DiscoverDialog(None, action)
+        dialog.words.setText('saga')
+        dialog.search()
+        self.assertTrue(any('/r/HFY/search.rss' in u and 'q=saga' in u for u in FeedFake.urls))
+        names = [dialog.table.item(r, 0).text() for r in range(dialog.table.rowCount())]
+        self.assertEqual(names, ['Saga of Ash', 'A lone tale  (single story)'], 'the series first, the lone story marked')
+        self.assertEqual((dialog.table.item(0, 1).text(), dialog.table.item(0, 2).text(), dialog.table.item(0, 3).text()), ('Writer', '3', '1\u20133'))
+        dialog.follow_selected()
+        self.assertIn('Select one series', dialog.message.text())
+        dialog.table.selectRow(0)
+        dialog.follow_selected()
+        chosen = dialog.chosen
+        self.assertEqual((chosen['name'], chosen['source']['user'], chosen['author_filter']), ('Saga of Ash', 'Writer', 'Writer'))
+        self.assertTrue(any('/user/Writer/submitted.rss' in u for u in FeedFake.urls), 'the author\'s own posts were read for every part')
+
+        # end to end from the menu: the series is added and collected as one book
+        class AutoDiscover(self.ui.DiscoverDialog):
+            def exec(self):
+                self.words.setText('saga')
+                self.search()
+                self.table.selectRow(0)
+                self.follow_selected()
+                return self.result()
+        action_module.DiscoverDialog = AutoDiscover
+        self.config.prefs['follows'] = []
+        action.discover()
+        self.assertEqual([f['name'] for f in self.config.prefs['follows']], ['Saga of Ash'])
+        books = list(action.gui.db.books.values())
+        self.assertEqual(len(books), 1)
+        z = zipfile.ZipFile(io.BytesIO(books[0]['formats']['EPUB']))
+        self.assertEqual(len([n for n in z.namelist() if n.startswith('OEBPS/s001_')]), 3, 'all three parts, whatever their title style')
+
+    def test_add_top_rated_series_follows_several_at_once(self):
+        core = self.core
+
+        class FeedFake:
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                if '/user/AlphaA/' in url:
+                    return feed(*[entry(f'a{n}', f'Big Saga {n}', f'<p>a{n}</p>', author='/u/AlphaA', stamp=f'2026-10-0{n}T10:00:00+00:00') for n in (3, 2, 1)])
+                if '/user/BravoB/' in url:
+                    return feed(*[entry(f'b{n}', f'Mid Epic {n}', f'<p>b{n}</p>', author='/u/BravoB', stamp=f'2026-10-0{n}T11:00:00+00:00') for n in (4, 3, 2, 1)])
+                return feed()
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        action_module = importlib.import_module(self.package + '.action')
+        self.config.prefs['follows'] = []
+
+        def post(i, title, author, score):
+            return {'id': f't3_{i}', 'title': title, 'author': author, 'flair': 'OC', 'created': 1.7e9 + i, 'html': '<p>x</p>', 'link': '', 'score': score}
+        entries = ([post(n, f'Big Saga {n}', 'AlphaA', 5000 - n) for n in (1, 2, 3)] + [post(10 + n, f'Mid Epic {n}', 'BravoB', 900 - n) for n in (1, 2, 3, 4)]
+                   + [post(20, 'Lone', 'CeeC', 10 ** 6)])
+        dialog = self.ui.DiscoverDialog(None, action)
+        dialog.add_top()
+        self.assertIn('Search or browse first', dialog.message.text())
+        dialog.groups = core.group_series([dict(e, score=0) for e in entries])
+        dialog.add_top()
+        self.assertIn('Ratings need the official API', dialog.message.text())
+        dialog.groups = core.group_series(entries)
+        dialog.top_count.setValue(2)
+        dialog.min_parts.setValue(3)
+        dialog.add_top()
+        self.assertEqual([f['name'] for f in dialog.chosen_many], ['Big Saga', 'Mid Epic'])
+        self.assertEqual(dialog.result(), 1)
+
+        class AutoTop(self.ui.DiscoverDialog):
+            def exec(self):
+                self.groups = core.group_series(entries)
+                self.top_count.setValue(5)
+                self.add_top()
+                return self.result()
+        action_module.DiscoverDialog = AutoTop
+        action.discover()
+        self.assertEqual([f['name'] for f in self.config.prefs['follows']], ['Big Saga', 'Mid Epic'])
+        titles = sorted(b['mi'].title for b in action.gui.db.books.values())
+        self.assertEqual(titles, ['Big Saga', 'Mid Epic'], 'one growing book per series, collected straight away')
+        # a second time there is nothing new to add
+        AutoTop.exec = lambda self: (setattr(self, 'groups', core.group_series(entries)), self.add_top(), self.result())[2]
+        action.discover()
+        self.assertEqual(len(self.config.prefs['follows']), 2)
 
     def test_manage_dialog_lists_and_removes_follows_and_their_cache(self):
         follow = self.core.new_follow('Series', 'u/writer', 'Chapter')

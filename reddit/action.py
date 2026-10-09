@@ -10,7 +10,7 @@ from qt.core import QAction, QMenu, QTimer
 from calibre_plugins.reddit_follower import core, libkit
 from calibre_plugins.reddit_follower.config import prefs
 from calibre_plugins.reddit_follower.guikit import run_task
-from calibre_plugins.reddit_follower.ui import ManageDialog, SettingsDialog
+from calibre_plugins.reddit_follower.ui import DiscoverDialog, ManageDialog, SettingsDialog
 
 IDENTIFIER = 'redditfollow'
 TICK_MS = 15 * 60 * 1000       # how often we look at which stories are due; looking costs nothing
@@ -25,7 +25,7 @@ class FollowerAction(InterfaceAction):
     def genesis(self):
         menu = QMenu(self.gui)
         self.qaction.setMenu(menu)
-        for title, slot in (('Followed stories…', self.manage), ('Check for new chapters now', self.check_all_now), ('Settings…', self.settings)):
+        for title, slot in (('Followed stories…', self.manage), ('Find stories…', self.discover), ('Check for new chapters now', self.check_all_now), ('Settings…', self.settings)):
             action = QAction(title, self.gui)
             action.triggered.connect(slot)
             menu.addAction(action)
@@ -64,6 +64,16 @@ class FollowerAction(InterfaceAction):
     # -- entry points
     def manage(self):
         ManageDialog(self.gui, self).exec()
+
+    def discover(self):
+        """Search or browse a subreddit for stories and whole series; a chosen series is added and collected at once."""
+        dialog = DiscoverDialog(self.gui, self)
+        if dialog.exec() != DiscoverDialog.DialogCode.Accepted:
+            return
+        added = ([dialog.chosen] if dialog.chosen is not None else []) + list(dialog.chosen_many)
+        if added:
+            prefs['follows'] = prefs['follows'] + added
+            self.check_now(added)
 
     def settings(self):
         SettingsDialog(self.gui).exec()
@@ -168,6 +178,8 @@ class FollowerAction(InterfaceAction):
         cache = core.ChapterCache(self.cache_dir(), follow['id'])
         if not cache.posts:
             return ''
+        if follow.get('layout') == 'each':
+            return self.update_each(follow, cache)
         story = core.build_story(follow, cache)
         if not has_changes and libkit.find_book(self.gui, IDENTIFIER, story['id']) is not None:
             return ''
@@ -178,3 +190,23 @@ class FollowerAction(InterfaceAction):
             return f'could not update the book ({exc})'
         count = len(story['sections'])
         return f'added to your library with {count} chapter(s)' if created else f'book updated, now {count} chapter(s)'
+
+    def update_each(self, follow, cache):
+        """Make a separate library book from each cached post that has none yet. Returns a message or ''."""
+        added, errors = 0, 0
+        for post in core.pending_each(follow, cache):
+            story = core.build_each(follow, post)
+            try:
+                mi = libkit.metadata_for([story], None, IDENTIFIER, core.PUBLISHER)
+                libkit.upsert_epub(self.gui, mi, core.build_epub(story), IDENTIFIER, story['id'])
+            except Exception:
+                errors += 1
+                continue
+            cache.data.setdefault('added', []).append(post['id'])
+            added += 1
+        if added or errors:
+            cache.save()
+        left = len(core.pending_each(follow, cache, limit=10 ** 6))
+        parts = ([f'{added} new book(s) added'] if added else []) + ([f'{errors} could not be added'] if errors else []) + \
+                ([f'{left} more waiting for the next check'] if left else [])
+        return ', '.join(parts)

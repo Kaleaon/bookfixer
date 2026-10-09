@@ -5,7 +5,9 @@ user's own credentials (recommended), or its public Atom feeds read the way a fe
 trade-offs). Requests are infrequent, one page at a time, and a rate limit (HTTP 429) ends the run instead of being retried.
 """
 import base64
+import csv
 import html
+import io
 import json
 import os
 import re
@@ -29,7 +31,12 @@ PUBLISHER = 'Reddit'
 MIN_CHECK_HOURS = 1.0
 MIN_FEED_INTERVAL = 7.0       # seconds between requests without credentials (Reddit has allowed roughly 10 a minute)
 MIN_API_INTERVAL = 2.0        # seconds between requests through the official API
-FIRST_RUN_PAGES = 10         # newest 1000 posts at most on the first check
+FIRST_RUN_PAGES = 30         # newest 3000 posts at most per backfill pass; a longer history is finished by the next check
+NOTE_BATCH = 300             # author comments fetched per check (one request each); the rest follow on the next checks
+EACH_FIRST_RUN = 25          # 'each post is a book' follows add only the newest few on the first check, not a whole backlog
+EACH_FIRST_PAGES = 5
+EACH_PER_RUN = 50            # books added to the library per check
+NOTES_GAP_HOURS = 0.25       # how soon a check that still owes author comments may run again
 NAV_WORDS = r'(?:first|previous|prev|next|latest|last|index|wiki|series|home|start|final|chapter|part|start here|table of contents|toc)'
 
 
@@ -91,7 +98,14 @@ def describe_source(src):
 # Ready-made follows for series the user asked for. Authors and title patterns were read from the series' own first post.
 PRESETS = [
     {'label': 'Out of Cruel Space (r/HFY, by KyleKKent)', 'name': 'Out of Cruel Space', 'source': 'u/KyleKKent',
-     'title_filter': 'Out of Cruel Space', 'author_filter': 'KyleKKent'},
+     # the author renamed the series part-way: "Out of Cruel Space, Part N" became "OOCS, Into A Wider Galaxy, Part N"
+     'title_filter': 're:^\\s*(Out of Cruel Space|OOCS)\\b.*\\d', 'author_filter': 'KyleKKent',
+     # a fan-kept public chapter list (date, author, chapter, storyline) that names every chapter and fixes mistitled posts
+     'index_url': 'https://docs.google.com/spreadsheets/d/1IipEkkuMzpfhVlQh0BhOcrmHlguHBZhSKSLTwRhYDf8/edit?gid=1375133682',
+     'title_from_body': True},  # each post opens with its chapter title, e.g. 'The Pirates & The Bounty Hunters'
+    # many authors, one story per post, each with a flair; every post becomes its own book (newest few on the first check)
+    {'label': 'r/gayincest_stories (each post as its own book)', 'name': 'r/gayincest_stories', 'source': 'r/gayincest_stories',
+     'title_filter': '', 'author_filter': '', 'flair_filter': '', 'layout': 'each'},
 ]
 
 
@@ -110,11 +124,14 @@ def source_text(src):
 
 def _listing_path(src):
     if src['kind'] == 'subreddit':
-        return f"/r/{src['subreddit']}/new", {}
+        sort = src.get('sort', 'new')  # discovery browses the top of a subreddit; following always reads the newest
+        return f"/r/{src['subreddit']}/{sort}", ({'t': src.get('t', 'all')} if sort == 'top' else {})
     if src['kind'] == 'user':
         return f"/user/{src['user']}/submitted", {'sort': 'new'}
     base = f"/r/{src['subreddit']}/search" if src['subreddit'] else '/search'
-    params = {'q': src['query'], 'sort': 'new'}
+    params = {'q': src['query'], 'sort': src.get('sort', 'new')}
+    if src.get('t') and params['sort'] in ('top', 'relevance'):
+        params['t'] = src['t']
     if src['subreddit']:
         params['restrict_sr'] = 'on'
     return base, params
@@ -235,7 +252,7 @@ def parse_listing(json_text):
             'created': float(d.get('created_utc') or 0),
             'link': 'https://www.reddit.com' + d.get('permalink', ''),
             'html': main_html(d['selftext_html']) if d.get('selftext_html') else '',
-            'subreddit': d.get('subreddit', ''),
+            'subreddit': d.get('subreddit', ''), 'flair': (d.get('link_flair_text') or '').strip(), 'score': int(d.get('score') or 0),
         })
     return entries, listing.get('after')
 
@@ -300,6 +317,281 @@ class ApiSource:
         return parse_listing(text)
 
 
+    def author_comment(self, entry):
+        """The post author's own top-level comment as cleaned HTML ('' if there is none). One request."""
+        if not self._token or time.monotonic() >= self._expires:
+            self._authorize()
+        post_id = entry['id'].split('_', 1)[-1]
+        text = self.fetcher.get(f"{self.base}/comments/{post_id}?limit=100&depth=1&sort=top&raw_json=1",
+                                headers={'Authorization': f'bearer {self._token}', 'User-Agent': self.user_agent})
+        return top_level_author_comment(text, entry.get('author', ''))
+
+
+def top_level_author_comment(json_text, author):
+    data = json.loads(json_text)
+    if not (isinstance(data, list) and len(data) > 1):
+        return ''
+    for child in data[1].get('data', {}).get('children', []):
+        d = child.get('data', {}) if child.get('kind') == 't1' else {}
+        if author and d.get('author', '').casefold() == author.casefold() and d.get('body_html'):
+            return main_html(d['body_html'])
+    return ''
+
+
+# ---------------------------------------------------------------- finding stories and whole series
+
+_ROMAN = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100}
+_PART_TAIL = re.compile(
+    r'^(?P<stem>.*?\S)[\s,:;\-\u2013\u2014(\[#]*'
+    r'(?i:(?:part|pt\.?|chapter|ch\.?|book|episode|ep\.?|volume|vol\.?)\s*)?'
+    r'(?P<num>\d{1,4}|(?-i:[IVXLC]{1,6}))\s*[)\]]?\s*(?:[:\-\u2013\u2014].*)?$')
+
+
+def _roman(text):
+    total = 0
+    for i, ch in enumerate(text):
+        value = _ROMAN[ch]
+        total += -value if i + 1 < len(text) and _ROMAN[text[i + 1]] > value else value
+    return total
+
+
+_LEAD_TAGS = r'(?:[\[(][^\])]{0,30}[\])]\s*[-\u2013\u2014:]*\s*)*'
+_LEAD_TAGS_RE = re.compile(r'^\s*' + _LEAD_TAGS)
+
+
+def series_parts(title):
+    """('Why Humans Avoid War', 8) for 'Why Humans Avoid War VIII'; (title, None) when the title carries no part number.
+    Reads trailing numbers (12, Part 12, Ch. 12, (12), #12) and capital Roman numerals, with an optional ': subtitle'."""
+    title = title.strip()
+    bare = _LEAD_TAGS_RE.sub('', title).strip()  # [OC] and [Universe] tags in front do not name the series...
+    if bare != title:
+        stem, number = _split_part(bare)
+        if re.search(r'[A-Za-z]{3}', stem) and not stem[0].isdigit() and not re.fullmatch(r'(?i)(?:part|pt|chapter|ch|book|episode|ep|volume|vol)\W*', stem):
+            return stem, number
+    return _split_part(title)  # ...unless nothing but a number is left once they are removed
+
+
+def _split_part(title):
+    m = _PART_TAIL.match(title)
+    if not m:
+        return title, None
+    num = m.group('num')
+    return m.group('stem').strip(' ,:;-\u2013\u2014'), (int(num) if num.isdigit() else _roman(num))
+
+
+def _stem_key(stem):
+    return re.sub(r'\W+', ' ', stem.casefold()).strip()
+
+
+def group_series(entries):
+    """Group posts into likely series by author and title stem. Returns groups, biggest first: {'name', 'author', 'posts',
+    'numbers', 'flairs', 'is_series'}. A group is a series when two different part numbers appear, or the posts carry a
+    'series' flair; everything else is a single story. Posts without story text (links, images) are left out."""
+    groups = {}
+    for e in entries:
+        if not e.get('html') or not e.get('title'):
+            continue
+        stem, number = series_parts(e['title'])
+        g = groups.setdefault((e.get('author', '').casefold(), _stem_key(stem)), {
+            'name': stem, 'author': e.get('author', ''), 'posts': {}, 'numbers': set(), 'flairs': set(), 'score': 0})
+        g['posts'][e['id']] = e
+        g['score'] = g.get('score', 0) + int(e.get('score') or 0)  # public feeds carry no score, so this stays 0 without the API
+        if number is not None:
+            g['numbers'].add(number)
+        if e.get('flair'):
+            g['flairs'].add(e['flair'])
+    out = []
+    for g in groups.values():
+        g['posts'] = sorted(g['posts'].values(), key=lambda p: p['created'])
+        g['is_series'] = len(g['numbers']) >= 2 or any(re.search(r'(?i)series', f) for f in g['flairs']) and len(g['posts']) >= 2
+        out.append(g)
+    return sorted(out, key=lambda g: (-g['is_series'], -len(g['posts']), g['name'].casefold()))
+
+
+def rank_groups(groups, by='score'):
+    """Series first, then by total rating of the posts found ('score') or by how many parts were found ('posts')."""
+    key = (lambda g: g.get('score', 0)) if by == 'score' else (lambda g: len(g['posts']))
+    return sorted(groups, key=lambda g: (-g['is_series'], -key(g), -len(g['posts']), g['name'].casefold()))
+
+
+def followed_keys(follows):
+    """(author, name) of series already followed, to avoid adding the same one twice."""
+    keys = set()
+    for f in follows:
+        if f.get('author_filter'):
+            keys.add((f['author_filter'].casefold(), _stem_key(f['name'])))
+    return keys
+
+
+def top_series(groups, count=5, min_parts=3, follows=()):
+    """The highest rated series among discovered groups: real series with at least `min_parts` parts found, not already followed."""
+    taken = followed_keys(follows)
+    chosen = [g for g in rank_groups(groups, 'score') if g['is_series'] and len(g['posts']) >= min_parts
+              and (g['author'].casefold(), _stem_key(g['name'])) not in taken]
+    return chosen[:count]
+
+
+BROWSE = [('relevance', 'Best match for the search words'), ('top-all', 'Top of all time'), ('top-year', 'Top this year'),
+          ('top-month', 'Top this month'), ('new', 'Newest')]
+
+
+def discover_source(subreddit, words='', browse='relevance'):
+    """The listing to look through: a search (with words) or a browse of the subreddit's top or newest posts."""
+    subreddit = subreddit.strip().lstrip('/').replace('r/', '', 1).strip()
+    sort, _, period = browse.partition('-')
+    if not re.fullmatch(_NAME, subreddit or '-'):
+        raise SourceError('Enter a subreddit name such as HFY.')
+    if words.strip():
+        src = {'kind': 'search', 'subreddit': subreddit, 'user': '', 'query': words.strip(), 'sort': sort if sort in ('relevance', 'top', 'new') else 'relevance'}
+    else:
+        src = {'kind': 'subreddit', 'subreddit': subreddit, 'user': '', 'query': '', 'sort': sort if sort in ('top', 'new') else 'top'}
+    if period or src['sort'] == 'top':
+        src['t'] = period or 'all'
+    return src
+
+
+def discover(source, src, flair='', pages=3, cancelled=lambda: False, progress=lambda msg: None):
+    """Look through a few pages of a listing and group what is there into series and single stories."""
+    entries, after = [], None
+    for number in range(pages):
+        if cancelled():
+            raise Cancelled()
+        progress(f'Reading page {number + 1}')
+        found, after = source.page(src, after)
+        entries += [e for e in found if _text_matches(flair, e.get('flair', ''))]
+        if not found or not after:
+            break
+    return group_series(entries)
+
+
+def series_follow(group, author_note=False):
+    """A follow for a discovered series: the author's posts whose title starts with the series name."""
+    stem = group['name']
+    return new_follow(stem, f"u/{group['author']}", 're:^\\s*' + _LEAD_TAGS + re.escape(stem) + r'(?![A-Za-z0-9])', group['author'], author_note=author_note)
+
+
+def preview_series(source, follow, pages=FIRST_RUN_PAGES, cancelled=lambda: False, progress=lambda msg: None):
+    """Everything the author has under this series name, so the whole series can be judged before following it.
+    Returns {'count', 'first', 'last', 'titles'} (titles: first and last few)."""
+    posts, after = {}, None
+    for number in range(pages):
+        if cancelled():
+            raise Cancelled()
+        progress(f'Looking through {follow["source"]["user"]}\'s posts, page {number + 1}')
+        found, after = source.page(follow['source'], after)
+        for e in found:
+            if matches(e, follow):
+                posts[e['id']] = e
+        if not found or not after:
+            break
+    ordered = sorted(posts.values(), key=lambda p: p['created'])
+    day = lambda p: datetime.fromtimestamp(p['created'], timezone.utc).date().isoformat()
+    return {'count': len(ordered), 'first': day(ordered[0]) if ordered else '', 'last': day(ordered[-1]) if ordered else '',
+            'titles': [p['title'] for p in ordered[:3]] + (['\u2026'] if len(ordered) > 6 else []) + [p['title'] for p in ordered[-3:]] if len(ordered) > 3 else [p['title'] for p in ordered]}
+
+
+# ---------------------------------------------------------------- chapter index (a public spreadsheet)
+
+INDEX_REFRESH_HOURS = 24
+_SHEET = re.compile(r'https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_\-]+)')
+_CHAPTER_LABEL = re.compile(r'(?i)\bchapter\s+(\d+)')
+
+
+def sheet_csv_url(url):
+    """The CSV export address for a public Google Sheets link (the tab in the link, if it names one)."""
+    m = _SHEET.search(url or '')
+    if not m:
+        raise SourceError('That is not a Google Sheets address (https://docs.google.com/spreadsheets/d/...).')
+    gid = re.search(r'[#&?]gid=(\d+)', url)
+    return f'https://docs.google.com/spreadsheets/d/{m.group(1)}/export?format=csv' + (f'&gid={gid.group(1)}' if gid else '')
+
+
+def parse_index(csv_text, author=''):
+    """Chapters listed by an index sheet with columns Date, Author, Chapter and (optionally) Note. Returns
+    [{'n', 'label', 'note', 'ts'}] for the author's rows, where ts is the listed date read as UTC+2 (the sheet's CEST) in epoch
+    seconds. Rows whose Chapter cell has no 'Chapter N' (side stories, notes) are ignored."""
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    head = next((i for i, r in enumerate(rows) if len(r) > 2 and r[0].strip().lower().startswith('date') and 'chapter' in ' '.join(r).lower()), None)
+    if head is None:
+        raise ValueError('That sheet has no Date / Author / Chapter columns.')
+    cols = {c.strip().lower(): i for i, c in enumerate(rows[head]) if c.strip()}
+    col_date, col_author, col_chapter = cols.get('date (cest)', cols.get('date', 0)), cols.get('author', 1), cols.get('chapter', 2)
+    col_note = cols.get('note')
+    out = []
+    for r in rows[head + 1:]:
+        if len(r) <= col_chapter or not r[col_date].strip():
+            continue
+        if author and r[col_author].strip().casefold() != author.casefold():
+            continue
+        m = _CHAPTER_LABEL.search(r[col_chapter])
+        if not m or not re.match(r'\d{4}/\d\d/\d\d', r[col_date].strip()):
+            continue
+        try:
+            when = datetime.strptime(r[col_date].strip(), '%Y/%m/%d %H:%M').replace(tzinfo=timezone.utc).timestamp() - 2 * 3600
+        except ValueError:
+            continue
+        note = r[col_note].strip() if col_note is not None and len(r) > col_note else ''
+        out.append({'n': int(m.group(1)), 'label': re.sub(r'\s+', ' ', r[col_chapter]).strip(), 'note': re.sub(r'\s+', ' ', note), 'ts': when})
+    return out
+
+
+def match_index(posts, rows):
+    """Pair posts with index rows. First by chapter number and date (within three days, so Chapter 5 of two eras do not mix up),
+    then leftovers one-to-one by posting time (within 36 hours), which catches mistitled posts. Returns
+    ({post_id: row}, unmatched rows, unmatched posts)."""
+    posts = sorted(posts, key=lambda p: p['created'])
+    free = list(rows)
+    matched, left = {}, []
+    for p in posts:
+        numbers = {int(n) for n in re.findall(r'\d+', p['title'])}
+        near = [r for r in free if r['n'] in numbers and abs(r['ts'] - p['created']) <= 3 * 86400]
+        if near:
+            best = min(near, key=lambda r: abs(r['ts'] - p['created']))
+            matched[p['id']] = best
+            free.remove(best)
+        else:
+            left.append(p)
+    still = []
+    for p in left:
+        near = [r for r in free if abs(r['ts'] - p['created']) <= 36 * 3600]
+        if near:
+            best = min(near, key=lambda r: abs(r['ts'] - p['created']))
+            matched[p['id']] = best
+            free.remove(best)
+        else:
+            still.append(p)
+    return matched, free, still
+
+
+def index_title(row, fallback, with_note=True):
+    return row['label'] + (f" \u2013 {row['note']}" if row['note'] and with_note else '') if row else fallback
+
+
+def refresh_index(source, follow, cache, now=time.time):
+    """Fetch the follow's chapter index at most once a day. A failure keeps the older copy and is remembered, not fatal."""
+    url = follow.get('index_url')
+    if not url:
+        return
+    data = cache.data.get('index') or {}
+    if data.get('url') == url and now() - data.get('fetched', 0) < INDEX_REFRESH_HOURS * 3600 and data.get('rows'):
+        return
+    try:
+        rows = parse_index(source.fetcher.get(sheet_csv_url(url)), follow.get('author_filter', ''))
+        cache.data['index'] = {'url': url, 'fetched': now(), 'rows': rows, 'error': ''}
+    except (IOError, ValueError, SourceError) as exc:
+        cache.data['index'] = dict(data, url=url, fetched=now() - INDEX_REFRESH_HOURS * 3600 + 3600, error=str(exc)[:200])
+    cache.save()
+
+
+def index_report(follow, cache):
+    """What the index says about the collected chapters: {'rows', 'matched', 'missing' (labels), 'unlisted' (post titles)}."""
+    data = cache.data.get('index') or {}
+    rows = data.get('rows') or []
+    matched, free, unlisted = match_index(list(cache.posts.values()), rows) if rows else ({}, [], [])
+    return {'rows': len(rows), 'matched': len(matched), 'missing': [r['label'] for r in free], 'unlisted': [p['title'] for p in unlisted],
+            'error': data.get('error', '')}
+
+
 def make_source(mode, client_id='', client_secret='', username='', cancelled=lambda: False, refresh_token=''):
     """The reader for the chosen mode, paced so as to stay within Reddit's limits for that mode."""
     if mode == 'api':
@@ -334,10 +626,11 @@ def probe(source, src, follow=None, limit=25):
 
 # ---------------------------------------------------------------- follows, filters, and the chapter cache
 
-def new_follow(name, source_text, title_filter='', author_filter=''):
+def new_follow(name, source_text, title_filter='', author_filter='', author_note=False, layout='series', flair_filter='', index_url='', title_from_body=False):
     src = parse_source(source_text)
     return {'id': uuid.uuid4().hex[:10], 'name': name.strip() or describe_source(src), 'source': src,
             'title_filter': title_filter.strip(), 'author_filter': author_filter.strip().lstrip('/').replace('u/', '', 1),
+            'author_note': bool(author_note), 'layout': 'each' if layout == 'each' else 'series', 'flair_filter': flair_filter.strip(), 'index_url': index_url.strip(), 'title_from_body': bool(title_from_body),
             'last_checked': 0.0, 'last_status': ''}
 
 
@@ -355,8 +648,39 @@ def matches(entry, follow):
                 return False
         elif flt.casefold() not in entry['title'].casefold():
             return False
+    if not _text_matches(follow.get('flair_filter', ''), entry.get('flair', '')):
+        return False
+    if follow.get('layout') == 'each' and stated_minor_age(entry['title']):
+        return False
     author = follow.get('author_filter', '')
     return not author or entry.get('author', '').casefold() == author.casefold()
+
+
+def _text_matches(flt, text):
+    if not flt:
+        return True
+    if flt.lower().startswith('re:'):
+        try:
+            return bool(re.search(flt[3:], text, re.I))
+        except re.error:
+            return False
+    return flt.casefold() in text.casefold()
+
+
+_AGE_TAGS = re.compile(r'[\[(]\s*[mfMF]?\s*(\d{1,2})\s*[mfMF]?\s*[\])]')
+_AGE_WORDS = re.compile(r'(?i)\b(\d{1,2})\s*(?:yo|y/o|y\.o\.|years?[ -]old)\b')
+_AGE_LETTER = re.compile(r'(?i)\b(\d{1,2})\s?[mf]\b')
+
+
+def stated_minor_age(title):
+    """True if the title states an age under 18 (such as [16M], (17), 15 yo). A title-only check: it cannot know about ages
+    that are not in the title, and a bracketed number that is not an age (a part number) counts too, so it errs on the side
+    of skipping. Applied to 'each post is a book' follows, which take posts from many authors."""
+    for pattern in (_AGE_TAGS, _AGE_WORDS, _AGE_LETTER):
+        for m in pattern.finditer(title):
+            if 1 <= int(m.group(1)) < 18:
+                return True
+    return False
 
 
 class ChapterCache:
@@ -399,8 +723,16 @@ def check_follow(source, follow, cache, max_pages=None, cancelled=lambda: False,
     The first check pages back through the feed; later checks read only until they reach posts seen before. A
     RateLimited error propagates after the cache has been saved with whatever was read."""
     src = follow['source']
-    first_run = not cache.posts and not cache.data['newest_created']
-    max_pages = max_pages or (FIRST_RUN_PAGES if first_run else 3)
+    # a history is "complete" once a pass has read all the way back; until then each check keeps backfilling (older caches
+    # from before this was tracked count as incomplete, so they are topped up once)
+    signature = [follow.get('title_filter', ''), follow.get('author_filter', ''), source_text(src), follow.get('flair_filter', ''),
+                 follow.get('layout', 'series')]
+    if cache.data.get('signature') != signature:
+        cache.data['complete'] = False  # the filters changed, so older posts may now belong
+        cache.data['signature'] = signature
+    first_run = not cache.data.get('complete')
+    each = follow.get('layout') == 'each'
+    max_pages = max_pages or ((EACH_FIRST_PAGES if each else FIRST_RUN_PAGES) if first_run else 3)
     known_newest, known_id = cache.data['newest_created'], cache.data['newest_id']
     new, changed, after, pages, newest = [], [], None, 0, (0.0, '')
     try:
@@ -416,6 +748,8 @@ def check_follow(source, follow, cache, max_pages=None, cancelled=lambda: False,
                     newest = (e['created'], e['id'])
                 if not first_run and (e['id'] == known_id or (known_newest and e['created'] < known_newest - 1)):
                     reached_known = True
+                if not first_run and known_newest and e['created'] < known_newest - 1 and e['id'] not in cache.posts:
+                    continue  # older than anything collected and never kept: not part of this check ('each' follows skip their backlog on purpose)
                 if not matches(e, follow):
                     continue
                 old = cache.posts.get(e['id'])
@@ -423,16 +757,123 @@ def check_follow(source, follow, cache, max_pages=None, cancelled=lambda: False,
                     new.append(e['title'])
                 elif old['html'] != e['html'] or old['title'] != e['title']:
                     changed.append(e['title'])
+                    if e['id'] in cache.data.get('added', []):
+                        cache.data['added'].remove(e['id'])  # an edited post becomes a fresh book
                 else:
                     continue
-                cache.posts[e['id']] = {k: e[k] for k in ('id', 'title', 'author', 'created', 'link', 'html')}
+                cache.posts[e['id']] = {k: e.get(k, '') for k in ('id', 'title', 'author', 'created', 'link', 'html', 'flair')}
+                if old is not None and 'note' in old:
+                    cache.posts[e['id']]['note'] = old['note']
             if not entries or not after or reached_known:
+                if first_run and (not entries or not after):
+                    cache.data['complete'] = True
                 break
+        if each and first_run:
+            cache.data['complete'] = True  # never backfills; only the newest few are taken
+            keep = {p['id'] for p in sorted(cache.posts.values(), key=lambda p: p['created'], reverse=True)[:EACH_FIRST_RUN]}
+            for post_id in [i for i in cache.posts if i not in keep]:
+                del cache.posts[post_id]
+            new = [t for t in new if any(p['title'] == t for p in cache.posts.values())]
     finally:
         if newest[0]:
             cache.data['newest_created'], cache.data['newest_id'] = max(known_newest, newest[0]), newest[1] if newest[0] >= known_newest else known_id
         cache.save()
-    return {'new': new, 'changed': changed, 'pages': pages}
+    pending = fetch_notes(source, follow, cache, cancelled, progress)
+    refresh_index(source, follow, cache)
+    return {'new': new, 'changed': changed, 'pages': pages, 'notes_pending': pending}
+
+
+def fetch_notes(source, follow, cache, cancelled=lambda: False, progress=lambda msg: None, batch=None):
+    """Fetch the author's own comment for cached chapters that lack one (only when the follow asks for it and the reader is
+    the API). Returns how many chapters still wait. A rate limit propagates after the cache is saved."""
+    if not follow.get('author_note') or not hasattr(source, 'author_comment'):
+        return 0
+    todo = [p for p in sorted(cache.posts.values(), key=lambda p: p['created'], reverse=True) if 'note' not in p]
+    done = 0
+    try:
+        for post in todo[:batch or NOTE_BATCH]:
+            if cancelled():
+                raise Cancelled()
+            progress(f"{follow['name']}: author comment {done + 1} of {min(len(todo), batch or NOTE_BATCH)}")
+            post['note'] = source.author_comment(post)
+            done += 1
+    finally:
+        if done:
+            cache.save()
+    return len(todo) - done
+
+
+_ZERO_WIDTH = '\u200b\u200c\u200d\ufeff'
+_BLANK_PARA = re.compile(r'<p>(?:\s|&nbsp;|&#8203;|&#x200[bB];|[' + _ZERO_WIDTH + r'])*</p>')
+_PARA = re.compile(r'<p>(.*?)</p>', re.S)
+_MARKER = re.compile(r'(?i)^[~*\[(]*\s*(?:first|second|third|early|1st)\s*[~*\])]*[.!]*$')
+
+
+def _plain(fragment):
+    return re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', '', fragment))).strip(' ' + _ZERO_WIDTH)
+
+
+def _looks_like_title(text):
+    if len(text) > 80 or '(' in text or text.startswith(('"', '\u201c', '\u2018')):
+        return False
+    if text.endswith('!'):  # "Danger Zone!" is a title, "Run!" is not: every longer word must be capitalised
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z'\u2019]+", text) if len(w) > 3]
+        return bool(words) and all(w[0].isupper() for w in words)
+    return not text.endswith(('.', '?', ',', ';', ':', '"', '\u201d', '\u2026'))
+
+
+def split_opening(body_html):
+    """Look at how a post opens. Returns (title, notes, body). Some authors open every post with its chapter title (a short line
+    without sentence punctuation), maybe with a comment-race marker like ~First~ and a parenthesised note to readers, in any
+    order. The title and the markers are taken out, the notes (text in brackets, shown without them) are returned separately
+    as HTML, and empty paragraphs are dropped. A post that does not open that way comes back unchanged apart from blank paragraphs."""
+    body_html = _BLANK_PARA.sub('', body_html)
+    title, notes, cut, end = '', [], [], 0
+    for number, match in enumerate(_PARA.finditer(body_html)):
+        if number >= 4:
+            break
+        text = _plain(match.group(1))
+        if _MARKER.match(text):
+            cut.append(match.span())
+        elif text.startswith('(') and text.endswith(')') or (text.startswith('[') and text.endswith(']') and len(text) > 40):
+            inner = match.group(1).strip()
+            if inner[:1] in '([' and inner[-1:] in ')]':
+                inner = inner[1:-1].strip()
+            notes.append(inner)
+            cut.append(match.span())
+        elif not title and _looks_like_title(text):
+            title = text
+            cut.append(match.span())
+        else:
+            break
+    if not title and not notes and not cut:
+        return '', [], body_html
+    for start, stop in reversed(cut):
+        body_html = body_html[:start] + body_html[stop:]
+    return title, notes, body_html
+
+
+def split_body_title(body_html):
+    """(title, body with the title, markers and notes taken out); see split_opening."""
+    title, _, body = split_opening(body_html)
+    return title, body
+
+
+def author_aside(label, parts):
+    return f'<div class="author-note"><p class="author-note-label">{label}</p>' + ''.join(
+        part if part.lstrip().startswith('<') else f'<p>{part}</p>' for part in parts) + '</div>'
+
+
+def chapter_html(post, title_from_body=False):
+    body, notes = _BLANK_PARA.sub('', post['html'] or ''), []
+    if title_from_body:
+        _, notes, body = split_opening(body)
+    body = body or '<p>(empty)</p>'
+    if notes:
+        body = author_aside("Author's note", notes) + body
+    if post.get('note'):
+        body += author_aside("Author's comment", [post['note']])
+    return body
 
 
 def build_story(follow, cache):
@@ -440,15 +881,50 @@ def build_story(follow, cache):
     posts = cache.ordered()
     if not posts:
         raise ValueError('Nothing has been collected for this series yet.')
+    titles, from_body = {}, follow.get('title_from_body')
+    if (cache.data.get('index') or {}).get('rows'):
+        matched, _, _ = match_index(posts, cache.data['index']['rows'])
+        titles = {pid: index_title(row, None, with_note=not from_body) for pid, row in matched.items()}
+    def section(p):
+        name = titles.get(p['id']) or p['title']
+        chapter = split_body_title(p['html'] or '')[0] if from_body else ''
+        return (f'{name} \u2013 {chapter}' if chapter else name), chapter_html(p, from_body)
     author = Counter(p['author'] for p in posts).most_common(1)[0][0] or 'Unknown'
     last = datetime.fromtimestamp(posts[-1]['created'], timezone.utc).date().isoformat()
     first = datetime.fromtimestamp(posts[0]['created'], timezone.utc).date().isoformat()
     src = follow['source']
     tags = ['Reddit'] + ([f"r/{src['subreddit']}"] if src.get('subreddit') else [])
     return {'id': 'reddit-' + follow['id'], 'url': posts[-1]['link'] or WWW, 'title': follow['name'], 'author': author,
-            'sections': [(p['title'], p['html'] or '<p>(empty)</p>') for p in posts], 'tags': tags, 'categories': [],
+            'sections': [section(p) for p in posts], 'tags': tags, 'categories': [],
             'summary': f"{len(posts)} chapters collected from Reddit ({describe_source(src)}), {first} to {last}.",
             'publisher': PUBLISHER, 'pubdate': first}
+
+
+_PART = re.compile(r"(?i)^(?P<stem>.*?)[\s,:;\-\u2013\u2014(\[]*\b(?:part|pt\.?|chapter|ch\.?)\s*(?P<n>\d+)\b")
+
+
+def build_each(follow, post):
+    """One post as its own story dict: flair becomes tags ('TRUE STORY - Uncle' -> 'TRUE STORY', 'Uncle'), and a title like
+    'Name, Part 3' joins the Calibre series 'Name' (index 3)."""
+    m = re.search(r'/r/([^/]+)/', post.get('link', ''))
+    tags = ['Reddit'] + ([f'r/{m.group(1)}'] if m else [])
+    for piece in re.split(r'\s+[-\u2013\u2014]\s+', post.get('flair', '')):
+        if piece.strip():
+            tags.append(piece.strip())
+    story = {'id': 'reddit-' + post['id'], 'url': post.get('link') or WWW, 'title': post['title'], 'author': post.get('author') or 'Unknown',
+             'sections': [(post['title'], chapter_html(post))], 'tags': list(dict.fromkeys(tags)), 'categories': [], 'summary': '',
+             'publisher': PUBLISHER,
+             'pubdate': datetime.fromtimestamp(post['created'], timezone.utc).date().isoformat()}
+    part = _PART.match(post['title'])
+    if part and len(re.sub(r'\W', '', part.group('stem'))) >= 4:
+        story['series'], story['series_index'] = part.group('stem').strip(' ,:;-\u2013\u2014'), float(part.group('n'))
+    return story
+
+
+def pending_each(follow, cache, limit=None):
+    """Cached posts not yet made into library books, oldest first (at most `limit`)."""
+    added = set(cache.data.get('added', []))
+    return [p for p in cache.ordered() if p['id'] not in added][:limit or EACH_PER_RUN]
 
 
 def build_epub(story):
@@ -462,6 +938,9 @@ def due(follow, hours, now=None):
     if not follow.get('last_checked'):
         return True  # never checked
     now = time.time() if now is None else now
+    if follow.get('notes_pending'):
+        hours = NOTES_GAP_HOURS  # still collecting author comments: carry on soon, a few pages of listing per check
+        return now - follow['last_checked'] >= hours * 3600
     return now - follow['last_checked'] >= max(hours, MIN_CHECK_HOURS) * 3600
 
 
@@ -478,7 +957,20 @@ def run_follows(source, follows, cache_dir, cancelled=lambda: False, progress=la
             outcome = check_follow(source, follow, cache, cancelled=cancelled, progress=progress)
             result['new'], result['changed'] = outcome['new'], outcome['changed']
             follow['last_checked'] = now()
+            follow['notes_pending'] = bool(outcome['notes_pending'])
             follow['last_status'] = (f"{len(outcome['new'])} new chapter(s)" if outcome['new'] else 'up to date')
+            if outcome['notes_pending']:
+                follow['last_status'] += f"; {outcome['notes_pending']} author comment(s) still to fetch"
+            elif follow.get('author_note') and not hasattr(source, 'author_comment'):
+                follow['last_status'] += '; author comments need the official API'
+            if follow.get('index_url'):
+                report = index_report(follow, cache)
+                if report['error']:
+                    follow['last_status'] += f"; chapter index not read ({report['error'][:60]})"
+                elif report['missing']:
+                    follow['last_status'] += f"; {len(report['missing'])} chapter(s) in the index have no Reddit post"
+                elif report['rows']:
+                    follow['last_status'] += '; matches the chapter index'
         except RateLimited as exc:
             result.update(rate_limited=True, retry_after=exc.retry_after, error=str(exc))
             follow['last_status'] = 'Reddit asked us to slow down; will try again later'

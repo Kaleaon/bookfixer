@@ -187,6 +187,460 @@ def post(n, title=None, html=None, author='Writer'):
             'link': f'https://www.reddit.com/r/HFY/comments/{n:03d}/x/', 'html': html if html is not None else f'<p>Chapter {n} text.</p>', 'subreddit': 'HFY'}
 
 
+class LongSeriesTests(unittest.TestCase):
+    """Found by running the plugin on the real, ~1800-post Out of Cruel Space history."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        preset = core.PRESETS[0]
+        self.follow = core.new_follow(preset['name'], preset['source'], preset['title_filter'], preset['author_filter'])
+
+    def test_preset_follows_the_series_across_its_rename(self):
+        for title in ('Out of Cruel Space, Part 1', 'Out of Cruel Space, part 12', 'OOCS, Into A Wider Galaxy, Part 800',
+                      'OOCS, Into The Wider Galaxy, Part 3', 'OOCS, Into A Wider Galaxy 77'):
+            self.assertTrue(core.matches(post(1, title=title, author='KyleKKent'), self.follow), title)
+        for title in ('Out of Cruel Space Side Story: Of Dog, Volpir, and Man', 'Something else, Part 4'):
+            self.assertFalse(core.matches(post(1, title=title, author='KyleKKent'), self.follow), title)
+        self.assertFalse(core.matches(post(1, title='OOCS, Into A Wider Galaxy, Part 9', author='Fan'), self.follow))
+
+    def test_first_check_reads_a_history_longer_than_ten_pages(self):
+        posts = [post(n, author='KyleKKent') for n in range(1500, 0, -1)]
+        source = FakeSource(posts, per_page=100)
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        result = core.check_follow(source, self.follow, cache)
+        self.assertEqual((len(cache.posts), result['pages']), (1500, 15))
+        self.assertTrue(cache.data['complete'])
+
+    def test_unfinished_backfill_continues_and_old_caches_are_topped_up(self):
+        posts = [post(n, author='KyleKKent') for n in range(300, 0, -1)]
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        core.check_follow(FakeSource(posts, per_page=50), self.follow, cache, max_pages=2)
+        self.assertEqual(len(cache.posts), 100)
+        self.assertFalse(cache.data.get('complete'), 'stopped early, so the history is not complete')
+        core.check_follow(FakeSource(posts, per_page=50), self.follow, cache)
+        self.assertEqual(len(cache.posts), 300)
+        # a later check stops once it reaches known posts
+        source = FakeSource([post(301, author='KyleKKent')] + posts, per_page=50)
+        result = core.check_follow(source, self.follow, cache)
+        self.assertEqual((result['new'], result['pages']), (['Out of Cruel Space (Chapter 301)'], 1))
+        # a cache written before completeness was tracked is read back through once
+        del cache.data['complete'], cache.data['signature']
+        again = core.check_follow(FakeSource([post(301, author='KyleKKent')] + posts, per_page=50), self.follow, cache)
+        self.assertTrue(cache.data['complete'] and again['pages'] == 7)
+
+    def test_changing_the_filter_rescans_the_history(self):
+        posts = [post(n, author='KyleKKent') for n in range(60, 0, -1)]
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        core.check_follow(FakeSource(posts, per_page=20), self.follow, cache)
+        self.follow['title_filter'] = ''
+        result = core.check_follow(FakeSource(posts, per_page=20), self.follow, cache)
+        self.assertEqual(result['pages'], 3, 'read all the way back again, not just to the newest known post')
+
+
+class AuthorNoteTests(unittest.TestCase):
+    COMMENTS = json.dumps([{'data': {'children': []}}, {'data': {'children': [
+        {'kind': 't1', 'data': {'author': 'Reader', 'body_html': '<div class="md"><p>Great!</p></div>'}},
+        {'kind': 't1', 'data': {'author': 'KyleKKent', 'body_html': '<div class="md"><p>Thanks for reading. <a href="https://x.example/">Wiki</a></p></div>'}},
+        {'kind': 'more', 'data': {}}]}}])
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.follow = core.new_follow('Series', 'u/KyleKKent', '', 'KyleKKent', author_note=True)
+
+    def test_picks_the_authors_own_top_level_comment(self):
+        self.assertIn('Thanks for reading', core.top_level_author_comment(self.COMMENTS, 'kylekkent'))
+        self.assertEqual(core.top_level_author_comment(self.COMMENTS, 'Nobody'), '')
+        self.assertEqual(core.top_level_author_comment('{}', 'x'), '')
+
+    def test_notes_are_fetched_in_batches_kept_and_added_to_the_book(self):
+        class Noted(FakeSource):
+            mode = 'api'
+            fetched = 0
+
+            def author_comment(self, entry):
+                Noted.fetched += 1
+                return '' if entry['id'].endswith('002') else f"<p>Note for {entry['id']}</p>"
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        source = Noted([post(n, author='KyleKKent') for n in range(5, 0, -1)], per_page=10)
+        core.check_follow(source, self.follow, cache)
+        self.assertEqual(Noted.fetched, 5)
+        left = core.fetch_notes(source, self.follow, cache)
+        self.assertEqual((left, Noted.fetched), (0, 5), 'chapters with a recorded note (even an empty one) are not asked again')
+        story = core.build_story(self.follow, cache)
+        self.assertIn("Author's comment", story['sections'][0][1])
+        self.assertIn('Note for t3_001', story['sections'][0][1])
+        self.assertNotIn("Author's comment", story['sections'][1][1], 'no comment, nothing added')
+        self.assertEqual(core.fetch_notes(source, self.follow, cache, batch=1), 0)
+        cache.posts['t3_004'].pop('note')
+        cache.posts['t3_003'].pop('note')
+        self.assertEqual(core.fetch_notes(source, self.follow, cache, batch=1), 1, 'newest first, and a batch leaves the rest')
+
+    def test_feed_reader_and_unwanting_follows_fetch_nothing(self):
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        core.check_follow(FakeSource([post(1, author='KyleKKent')]), self.follow, cache)
+        self.assertNotIn('note', cache.posts['t3_001'])
+        plain = core.new_follow('S', 'u/writer')
+        self.assertEqual(core.fetch_notes(type('A', (), {'author_comment': lambda s, e: 'x'})(), plain, cache), 0)
+
+    def test_follows_owing_comments_are_due_again_soon(self):
+        follow = dict(self.follow, last_checked=1000.0, notes_pending=True)
+        self.assertFalse(core.due(follow, 6, now=1000.0 + 600))
+        self.assertTrue(core.due(follow, 6, now=1000.0 + 1000))
+        self.assertFalse(core.due(dict(follow, notes_pending=False), 6, now=1000.0 + 1000))
+
+
+class OpeningTests(unittest.TestCase):
+    """How HFY's Out of Cruel Space opens its posts: a title line, sometimes a ~First~ marker and a note in brackets."""
+
+    def test_title_notes_and_markers_in_any_order(self):
+        cases = {
+            '<p>The Pirates &amp; The Bounty Hunters</p><p>\u200b</p><p>\u201cDamn they\u2019ve been here.\u201d Air-Farce remarks.</p>':
+                ('The Pirates & The Bounty Hunters', [], '<p>\u201cDamn they\u2019ve been here.\u201d Air-Farce remarks.</p>'),
+            '<p>(Today is just full of Derps.)</p><p>Capes and Conundrums</p><p>\u200b</p><p>He sat down.</p>':
+                ('Capes and Conundrums', ['Today is just full of Derps.'], '<p>He sat down.</p>'),
+            '<p>The Pirates</p><p>(I am so sorry, my brain clunked.)</p><p>\u201cAlright.\u201d</p>':
+                ('The Pirates', ['I am so sorry, my brain clunked.'], '<p>\u201cAlright.\u201d</p>'),
+            '<p>~First~</p><p>HHH/Herbert\u2019s Hundred Harem</p><p>He walked.</p>': ('HHH/Herbert\u2019s Hundred Harem', [], '<p>He walked.</p>'),
+            '<p>Danger Zone!</p><p>He ran.</p>': ('Danger Zone!', [], '<p>He ran.</p>'),
+            '<p>Miles Brent sighed to himself as he laid on the hard floor.</p><p>Next.</p>':
+                ('', [], '<p>Miles Brent sighed to himself as he laid on the hard floor.</p><p>Next.</p>'),
+            '<p>Run!</p><p>He ran.</p>': ('', [], '<p>Run!</p><p>He ran.</p>'),
+            '<p>\u201cHello there,\u201d he said</p><p>x</p>': ('', [], '<p>\u201cHello there,\u201d he said</p><p>x</p>'),
+            '<p>(Part of a longer aside that never closes</p><p>x</p>': ('', [], '<p>(Part of a longer aside that never closes</p><p>x</p>'),
+        }
+        for html, want in cases.items():
+            self.assertEqual(core.split_opening(html), want, html[:50])
+        self.assertEqual(core.split_body_title('<p>Title Here</p><p>He ran.</p>'), ('Title Here', '<p>He ran.</p>'))
+
+    def test_notes_become_a_boxed_aside_in_front_and_the_authors_comment_one_behind(self):
+        post = {'html': '<p>The Pirates</p><p>(Sorry, a short one today.)</p><p>Chapter text.</p>', 'note': '<p>Thanks for reading! <a href="https://x.example/">Wiki</a></p>'}
+        plain = core.chapter_html(post)
+        self.assertTrue(plain.startswith('<p>The Pirates</p>'), 'without the option the post is left as written')
+        html = core.chapter_html(post, True)
+        self.assertTrue(html.startswith('<div class="author-note"><p class="author-note-label">Author\'s note</p><p>Sorry, a short one today.</p></div><p>Chapter text.</p>'))
+        self.assertTrue(html.endswith('</p></div>') and "Author's comment" in html and 'Thanks for reading!' in html)
+        self.assertNotIn('The Pirates', html)
+        import storykit
+        cleaned = storykit.clean_fragment(html)
+        self.assertIn('<div class="author-note">', cleaned)
+        self.assertIn('<p class="author-note-label">', cleaned)
+        self.assertNotIn('class="evil"', storykit.clean_fragment('<div class="evil"><p>x</p></div>'), 'other classes are still dropped')
+        self.assertIn('.author-note', storykit.CSS)
+
+    def test_chapters_are_named_from_the_title_line_with_or_without_the_index(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        follow = core.new_follow('Out of Cruel Space', 'u/KyleKKent', '', 'KyleKKent', title_from_body=True)
+        cache = core.ChapterCache(tmp.name, follow['id'])
+        posts = [{'id': 't3_a', 'title': 'Out of Cruel Space, Part 59', 'author': 'KyleKKent', 'created': 1625000000.0, 'link': '', 'flair': 'OC',
+                  'html': '<p>The Pirates &amp; The Bounty Hunters</p><p>\u200b</p><p>Text one.</p>'},
+                 {'id': 't3_b', 'title': 'Out of Cruel Space, Part 1', 'author': 'KyleKKent', 'created': 1621000000.0, 'link': '', 'flair': 'OC',
+                  'html': '<p>Miles Brent sighed to himself as he laid on the hard floor.</p>'}]
+        cache.posts.update({p['id']: p for p in posts})
+        sections = core.build_story(follow, cache)['sections']
+        self.assertEqual([t for t, _ in sections], ['Out of Cruel Space, Part 1', 'Out of Cruel Space, Part 59 \u2013 The Pirates & The Bounty Hunters'])
+        self.assertEqual(sections[1][1], '<p>Text one.</p>', 'the title is not repeated in the text')
+        cache.data['index'] = {'url': 'u', 'fetched': 1, 'error': '', 'rows': [
+            {'n': 59, 'label': 'Chapter 059', 'note': 'Pirates; Bounty Hunters', 'ts': 1625000000.0}, {'n': 1, 'label': 'Chapter 001', 'note': 'Pirates', 'ts': 1621000000.0}]}
+        self.assertEqual([t for t, _ in core.build_story(follow, cache)['sections']],
+                         ['Chapter 001', 'Chapter 059 \u2013 The Pirates & The Bounty Hunters'], 'the title line replaces the sheet\'s storyline note')
+        off = core.new_follow('x', 'u/KyleKKent', '', 'KyleKKent')
+        self.assertEqual(core.build_story(off, cache)['sections'][1][0], 'Chapter 059 \u2013 Pirates; Bounty Hunters')
+
+
+class IndexTests(unittest.TestCase):
+    """A public chapter-list sheet (shape taken from the real Out of Cruel Space index) names chapters and catches mistitled posts."""
+    CSV = ('Out of Cruel Space (an extension of the archive),,,,\n'
+           'Date (CEST),Author,Chapter,Note,,Seq\n'
+           '2021/05/19 04:30,KyleKKent,Chapter 001,Pirates,,1\n'
+           '2021/05/20 01:00,KyleKKent,Chapter 002,Pirates; Bounty Hunters,,2\n'
+           '2021/05/21 22:40,KyleKKent,Chapter 003 [NSFW],,,3\n'
+           '2024/05/22 22:12,KyleKKent,"Into A Wider Galaxy, Chapter 010",AAA,,4\n'
+           '2024/05/23 22:10,KyleKKent,"Into A Wider Galaxy, Chapter 011",RAK and Roll,,5\n'
+           '2021/09/26 21:00,KamchatkasRevenge,Of Dog 1,Canon,,6\n'
+           '2021/05/29 21:00,KyleKKent,Side story,Canon,,7\n'
+           '2021/06/01 10:00,KyleKKent,Chapter 004,Never posted,,8\n')
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def rows(self):
+        return core.parse_index(self.CSV, 'KyleKKent')
+
+    def test_sheet_address_becomes_a_csv_export(self):
+        self.assertEqual(core.sheet_csv_url('https://docs.google.com/spreadsheets/d/AbC-1_2/edit?pli=1&gid=99#gid=99'),
+                         'https://docs.google.com/spreadsheets/d/AbC-1_2/export?format=csv&gid=99')
+        self.assertEqual(core.sheet_csv_url('https://docs.google.com/spreadsheets/d/AbC/edit'), 'https://docs.google.com/spreadsheets/d/AbC/export?format=csv')
+        with self.assertRaises(core.SourceError):
+            core.sheet_csv_url('https://example.com/sheet')
+
+    def test_parsing_keeps_only_the_authors_numbered_chapters(self):
+        rows = self.rows()
+        self.assertEqual([r['label'] for r in rows], ['Chapter 001', 'Chapter 002', 'Chapter 003 [NSFW]', 'Into A Wider Galaxy, Chapter 010',
+                                                       'Into A Wider Galaxy, Chapter 011', 'Chapter 004'])
+        self.assertEqual((rows[1]['n'], rows[1]['note']), (2, 'Pirates; Bounty Hunters'))
+        self.assertAlmostEqual(rows[0]['ts'], core.datetime(2021, 5, 19, 2, 30, tzinfo=core.timezone.utc).timestamp())
+        with self.assertRaises(ValueError):
+            core.parse_index('a,b\n1,2\n')
+
+    def post(self, pid, title, when):
+        return {'id': pid, 'title': title, 'author': 'KyleKKent', 'html': '<p>x</p>', 'link': '', 'flair': '',
+                'created': core.datetime.strptime(when, '%Y-%m-%d %H:%M').replace(tzinfo=core.timezone.utc).timestamp()}
+
+    def posts(self):
+        return [self.post('t3_a', 'Out of Cruel Space, Part 1', '2021-05-19 03:00'), self.post('t3_b', 'Out of Cruel Space, Part 2', '2021-05-20 00:00'),
+                self.post('t3_c', 'Out of Cruel Space, Part 3', '2021-05-21 20:50'),
+                self.post('t3_d', 'OOCS, Into A Wider Galaxy, Part 1010', '2024-05-22 20:30'),   # a typo for Part 10
+                self.post('t3_e', 'OOCS, Into A Wider Galaxy, Part 011', '2024-05-23 21:00'),
+                self.post('t3_f', 'OOCS, Into A Wider Galaxy, Part 12', '2024-05-24 21:00')]  # newer than the sheet
+
+    def test_matching_by_number_then_by_time_catches_typos_and_reports_both_sides(self):
+        matched, missing, unlisted = core.match_index(self.posts(), self.rows())
+        self.assertEqual({pid: r['label'] for pid, r in matched.items()}, {
+            't3_a': 'Chapter 001', 't3_b': 'Chapter 002', 't3_c': 'Chapter 003 [NSFW]', 't3_d': 'Into A Wider Galaxy, Chapter 010',
+            't3_e': 'Into A Wider Galaxy, Chapter 011'})
+        self.assertEqual([r['label'] for r in missing], ['Chapter 004'], 'listed in the index but never posted')
+        self.assertEqual([p['id'] for p in unlisted], ['t3_f'], 'posted but not yet in the index')
+        self.assertEqual(core.index_title(matched['t3_b'], 'x'), 'Chapter 002 \u2013 Pirates; Bounty Hunters')
+        self.assertEqual(core.index_title(matched['t3_c'], 'x'), 'Chapter 003 [NSFW]')
+        self.assertEqual(core.index_title(None, 'fallback'), 'fallback')
+
+    def test_same_chapter_number_in_two_eras_does_not_mix_up(self):
+        rows = [{'n': 5, 'label': 'Chapter 005', 'note': '', 'ts': 1.6e9}, {'n': 5, 'label': 'Into A Wider Galaxy, Chapter 005', 'note': '', 'ts': 1.7e9}]
+        posts = [dict(self.post('t3_x', 'Part 5', '2021-01-01 00:00'), created=1.7e9 + 100), dict(self.post('t3_y', 'Part 5', '2021-01-01 00:00'), created=1.6e9 + 100)]
+        matched, _, _ = core.match_index(posts, rows)
+        self.assertEqual((matched['t3_x']['label'], matched['t3_y']['label']), ('Into A Wider Galaxy, Chapter 005', 'Chapter 005'))
+
+    def test_index_is_fetched_once_a_day_survives_failures_and_names_the_chapters(self):
+        calls = []
+
+        class Source:
+            mode = 'rss'
+
+            def __init__(s):
+                s.fetcher = s
+                s.fail = False
+
+            def get(s, url, **kwargs):
+                calls.append(url)
+                if s.fail:
+                    raise IOError('Could not fetch: HTTP Error 403')
+                return IndexTests.CSV
+
+            def page(s, src, after=None, limit=100):
+                return IndexTests.posts_for(self), None
+        follow = core.new_follow('Out of Cruel Space', 'u/KyleKKent', '', 'KyleKKent', index_url='https://docs.google.com/spreadsheets/d/AbC/edit?gid=5')
+        cache = core.ChapterCache(self.tmp.name, follow['id'])
+        source = Source()
+        core.check_follow(source, follow, cache)
+        self.assertEqual(calls, ['https://docs.google.com/spreadsheets/d/AbC/export?format=csv&gid=5'])
+        core.check_follow(source, follow, cache)
+        self.assertEqual(len(calls), 1, 'not fetched again within a day')
+        titles = [t for t, _ in core.build_story(follow, cache)['sections']]
+        self.assertEqual(titles[0], 'Chapter 001 \u2013 Pirates')
+        self.assertIn('Into A Wider Galaxy, Chapter 010 \u2013 AAA', titles, 'the mistitled post is named by the index')
+        self.assertEqual(titles[-1], 'OOCS, Into A Wider Galaxy, Part 12', 'a post the index does not list keeps its own title')
+        report = core.index_report(follow, cache)
+        self.assertEqual((report['rows'], report['matched'], report['missing'], report['unlisted']), (6, 5, ['Chapter 004'], ['OOCS, Into A Wider Galaxy, Part 12']))
+        # a failed refresh keeps the copy we have and says so
+        cache.data['index']['fetched'] = 0
+        source.fail = True
+        core.check_follow(source, follow, cache)
+        self.assertIn('403', cache.data['index']['error'])
+        self.assertEqual(len(cache.data['index']['rows']), 6)
+        self.assertEqual(core.index_report(follow, cache)['matched'], 5)
+
+    @staticmethod
+    def posts_for(test):
+        return [e for e in test.posts()]
+
+
+class DiscoveryTests(unittest.TestCase):
+    """Finding stories, and whole series, on a subreddit like r/HFY (title shapes taken from its real top posts)."""
+
+    def test_part_numbers_in_the_shapes_hfy_uses(self):
+        cases = {
+            'The Nature of Predators 14': ('The Nature of Predators', 14),
+            'Why Humans Avoid War VIII': ('Why Humans Avoid War', 8),
+            'Why Humans Avoid War': ('Why Humans Avoid War', None),
+            'Out of Cruel Space, Part 12': ('Out of Cruel Space', 12),
+            'Salvage - Chapter 7': ('Salvage', 7),
+            'Salvage (12)': ('Salvage', 12),
+            'Salvage #12': ('Salvage', 12),
+            'A job for a deathworlder [Chapter 7]': ('A job for a deathworlder', 7),
+            'The Nature of Predators 2-99 [Final]': ('The Nature of Predators', 2),
+            '[OC][Jenkinsverse] - Salvage 31': ('Salvage', 31),
+            'Chrysalis 16: The Return': ('Chrysalis', 16),
+            'The Civil War': ('The Civil War', None),
+            'What Am I': ('What Am', 1),
+            'A Silly Thought\u2026': ('A Silly Thought\u2026', None),
+        }
+        for title, want in cases.items():
+            self.assertEqual(core.series_parts(title), want, title)
+
+    def test_tag_only_titles_keep_their_tags_as_the_name(self):
+        self.assertEqual(core.series_parts('[OC][JVerse] 4: Quarantine'), ('[OC][JVerse]', 4))
+        self.assertEqual(core.series_parts('[OC][Jenkinsverse] Chapter 7'), ('[OC][Jenkinsverse]', 7))
+
+    def posts(self):
+        def p(i, title, author='Alpha', flair='OC', created=None, html='<p>x</p>'):
+            return {'id': f't3_{i}', 'title': title, 'author': author, 'flair': flair, 'created': created or 1700000000.0 + i, 'html': html, 'link': ''}
+        return [p(1, 'Salvage 3'), p(2, 'Salvage 1'), p(3, '[OC] Salvage 2'), p(4, 'Salvage 3'), p(5, 'Lone story'),
+                p(6, 'Salvage 9', author='Bravo'), p(7, 'Salvage 10', author='Bravo'), p(8, 'Opener', flair='OC-FirstOfSeries'),
+                p(9, 'Opener 2', flair='OC-Series'), p(10, 'Picture', html=''), p(11, 'Hello 2', author='Cee')]
+
+    def test_grouping_by_author_and_name(self):
+        groups = core.group_series(self.posts())
+        by = {(g['author'], g['name']): g for g in groups}
+        salvage = by[('Alpha', 'Salvage')]
+        self.assertTrue(salvage['is_series'])
+        self.assertEqual((sorted(salvage['numbers']), len(salvage['posts'])), ([1, 2, 3], 4), 'a repeated post number is kept, tags in front do not split it')
+        self.assertTrue(by[('Bravo', 'Salvage')]['is_series'], 'the same name by another author is a different series')
+        self.assertTrue(by[('Alpha', 'Opener')]['is_series'], 'a series flair counts with two posts')
+        self.assertFalse(by[('Alpha', 'Lone story')]['is_series'])
+        self.assertFalse(by[('Cee', 'Hello')]['is_series'], 'one numbered post is not yet a series')
+        self.assertNotIn('Picture', [g['name'] for g in groups], 'posts without story text are ignored')
+        self.assertTrue(all(g['is_series'] for g in groups[:3]) and not groups[-1]['is_series'], 'series come first')
+        self.assertEqual([p['id'] for p in salvage['posts']], ['t3_1', 't3_2', 't3_3', 't3_4'], 'posts are listed by date')
+
+    def scored(self):
+        def p(i, title, author, score):
+            return {'id': f't3_{i}', 'title': title, 'author': author, 'flair': 'OC', 'created': 1700000000.0 + i, 'html': '<p>x</p>', 'link': '', 'score': score}
+        return [p(1, 'Big Saga 1', 'Alpha', 5000), p(2, 'Big Saga 2', 'Alpha', 4000), p(3, 'Big Saga 3', 'Alpha', 3000),
+                p(4, 'Small Tale 1', 'Bravo', 100), p(5, 'Small Tale 2', 'Bravo', 90), p(6, 'Small Tale 3', 'Bravo', 80),
+                p(7, 'Mid Epic 1', 'Cee', 900), p(8, 'Mid Epic 2', 'Cee', 800), p(9, 'Mid Epic 3', 'Cee', 700), p(10, 'Mid Epic 4', 'Cee', 600),
+                p(11, 'Short Pair 1', 'Dee', 99999), p(12, 'Short Pair 2', 'Dee', 99999), p(13, 'One Shot', 'Eee', 500000)]
+
+    def test_ratings_rank_series_and_top_rated_skips_short_followed_and_single(self):
+        groups = core.group_series(self.scored())
+        self.assertEqual({g['name']: g['score'] for g in groups}['Big Saga'], 12000)
+        self.assertEqual([g['name'] for g in core.rank_groups(groups, 'score')][:4], ['Short Pair', 'Big Saga', 'Mid Epic', 'Small Tale'], 'series first, best rated first')
+        self.assertEqual([g['name'] for g in core.rank_groups(groups, 'posts')][:2], ['Mid Epic', 'Big Saga'], 'or by parts found')
+        top = core.top_series(groups, count=2, min_parts=3)
+        self.assertEqual([g['name'] for g in top], ['Big Saga', 'Mid Epic'], 'two-part series and the single story are not eligible at three parts')
+        self.assertEqual([g['name'] for g in core.top_series(groups, 10, 2)][:3], ['Short Pair', 'Big Saga', 'Mid Epic'])
+        have = [core.series_follow(top[0])]
+        self.assertEqual([g['name'] for g in core.top_series(groups, 2, 3, have)], ['Mid Epic', 'Small Tale'], 'already followed series are skipped')
+        self.assertTrue(core.followed_keys(have) == {('alpha', 'big saga')})
+        self.assertEqual(core.followed_keys([{'name': 'x', 'author_filter': ''}]), set(), 'follows without an author cannot be matched')
+
+    def test_the_api_listing_carries_the_score_and_feeds_do_not(self):
+        listing = json.dumps({'data': {'after': None, 'children': [{'kind': 't3', 'data': {
+            'name': 't3_a', 'title': 'T', 'author': 'w', 'created_utc': 1.0, 'permalink': '/r/x/comments/a/t/',
+            'selftext_html': '<div class="md"><p>Hi.</p></div>', 'score': 1234}}]}})
+        self.assertEqual(core.parse_listing(listing)[0][0]['score'], 1234)
+        self.assertEqual(core.group_series([post(1)])[0]['score'], 0)
+
+    def test_follow_for_a_series_matches_its_parts_and_not_other_stories(self):
+        group = [g for g in core.group_series(self.posts()) if g['name'] == 'Salvage' and g['author'] == 'Alpha'][0]
+        follow = core.series_follow(group)
+        self.assertEqual((follow['name'], follow['source']['user'], follow['author_filter'], follow['layout']), ('Salvage', 'Alpha', 'Alpha', 'series'))
+        def hit(title, author='Alpha'):
+            return core.matches({'title': title, 'author': author, 'html': '<p>x</p>', 'flair': ''}, follow)
+        for title in ('Salvage', 'Salvage 40', '[OC][Jenkinsverse] - Salvage 41', 'Salvage, Part 42: The End', '(OC) Salvage 43'):
+            self.assertTrue(hit(title), title)
+        for title in ('Salvaged goods 1', 'Not Salvage 3'):
+            self.assertFalse(hit(title), title)
+        self.assertFalse(hit('Salvage 5', author='Bravo'))
+
+    def test_discover_source(self):
+        self.assertEqual(core.discover_source('r/HFY', 'deathworld', 'top-year'),
+                         {'kind': 'search', 'subreddit': 'HFY', 'user': '', 'query': 'deathworld', 'sort': 'top', 't': 'year'})
+        self.assertEqual(core.discover_source('HFY', '', 'top-all')['sort'], 'top')
+        self.assertEqual(core.discover_source('HFY', '', 'relevance')['sort'], 'top', 'browsing without words has no relevance, so top')
+        self.assertEqual(core.discover_source('HFY', '', 'new')['sort'], 'new')
+        with self.assertRaises(core.SourceError):
+            core.discover_source('not a name!', 'x')
+        self.assertIn('/r/HFY/top?', core.api_path(core.discover_source('HFY', '', 'top-month')))
+        self.assertIn('t=month', core.api_path(core.discover_source('HFY', '', 'top-month')))
+        self.assertIn('sort=relevance', core.api_path(core.discover_source('HFY', 'x', 'relevance')))
+        self.assertIn('/r/HFY/new?', core.api_path(core.parse_source('r/HFY')), 'following still reads the newest')
+
+    def test_discover_reads_pages_filters_flair_and_the_preview_finds_the_whole_series(self):
+        pages = [dict(p) for p in self.posts()]
+        source = FakeSource(pages, per_page=4)
+        groups = core.discover(source, {'kind': 'subreddit', 'subreddit': 'HFY'}, pages=2)
+        self.assertEqual(len(source.calls), 2, 'only the pages asked for')
+        only = core.discover(FakeSource(pages, per_page=20), {'kind': 'subreddit'}, flair='FirstOf')
+        self.assertEqual([g['name'] for g in only], ['Opener'])
+        history = [dict(self.posts()[0], id=f't3_h{n}', title=f'Salvage {n}', created=1600000000.0 + n * 86400) for n in range(1, 61)]
+        follow = core.series_follow([g for g in core.group_series(self.posts()) if g['name'] == 'Salvage' and g['author'] == 'Alpha'][0])
+        seen = core.preview_series(FakeSource(history, per_page=25), follow)
+        self.assertEqual((seen['count'], seen['first'], seen['last']), (60, '2020-09-14', '2020-11-12'))
+        self.assertIn('Salvage 1', seen['titles'][0])
+
+
+class EachPostTests(unittest.TestCase):
+    """A subreddit of stand-alone stories by many authors: every post becomes its own book."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.preset = [p for p in core.PRESETS if p.get('layout') == 'each'][0]
+        self.follow = core.new_follow(self.preset['name'], self.preset['source'], layout='each')
+
+    def story_post(self, n, title, flair='FICTION - Cousin', author=None):
+        e = post(n, title=title, author=author or f'writer{n}')
+        e['flair'] = flair
+        return e
+
+    def test_flair_filter_and_the_age_guard(self):
+        follow = dict(self.follow, flair_filter='FICTION')
+        self.assertTrue(core.matches(self.story_post(1, 'A summer at the lake (A story)'), follow))
+        self.assertFalse(core.matches(self.story_post(1, 'A summer', flair='TRUE STORY - Uncle'), follow))
+        self.assertTrue(core.matches(self.story_post(1, 'Long weekend', flair='x'), self.follow))
+        self.assertTrue(core.matches(self.story_post(1, 'Reunion [44M] and [24M]'), self.follow))
+        for title in ('Camping trip [16M] and [40M]', 'Me (17) and him', 'I am 15 yo and', 'About 17m things', 'We were 16 years old'):
+            self.assertTrue(core.stated_minor_age(title), title)
+            self.assertFalse(core.matches(self.story_post(1, title), self.follow), title)
+        self.assertTrue(core.matches(self.story_post(1, 'Part (2)'), dict(self.follow, layout='series')), 'series follows are not age-filtered')
+        self.assertFalse(core.stated_minor_age('Born in 1990, 21 chapters, [18M] and [45M]'))
+
+    def test_first_check_takes_only_the_newest_few_and_later_checks_the_rest(self):
+        posts = [self.story_post(n, f'Story number {n}') for n in range(40, 0, -1)]
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        result = core.check_follow(FakeSource(posts, per_page=100), self.follow, cache)
+        self.assertEqual(len(cache.posts), core.EACH_FIRST_RUN)
+        self.assertEqual(len(result['new']), core.EACH_FIRST_RUN)
+        self.assertIn('t3_040', cache.posts)
+        self.assertNotIn('t3_001', cache.posts, 'the old backlog is not pulled in')
+        later = core.check_follow(FakeSource([self.story_post(41, 'Story number 41')] + posts, per_page=100), self.follow, cache)
+        self.assertEqual(later['new'], ['Story number 41'])
+
+    def test_books_are_made_once_oldest_first_and_edits_make_a_fresh_one(self):
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        core.check_follow(FakeSource([self.story_post(n, f'Story {n}') for n in (3, 2, 1)], per_page=10), self.follow, cache)
+        self.assertEqual([p['title'] for p in core.pending_each(self.follow, cache)], ['Story 1', 'Story 2', 'Story 3'])
+        cache.data['added'] = ['t3_001', 't3_002']
+        self.assertEqual([p['id'] for p in core.pending_each(self.follow, cache)], ['t3_003'])
+        edited = dict(self.story_post(2, 'Story 2'), html='<p>edited</p>')
+        core.check_follow(FakeSource([self.story_post(3, 'Story 3'), edited, self.story_post(1, 'Story 1')], per_page=10),
+                          self.follow, cache, max_pages=1)
+        self.assertEqual(cache.data['added'], ['t3_001'], 'an edited post is made into a book again')
+        self.assertEqual(len(core.pending_each(self.follow, cache, limit=1)), 1, 'at most `limit` per run')
+
+    def test_one_post_as_a_story_with_tags_and_series(self):
+        one = dict(self.story_post(7, 'The Lake House, Part 3', flair='TRUE STORY - Brother/In-Law/Step', author='writer7'),
+                   link='https://www.reddit.com/r/gayincest_stories/comments/abc/x/')
+        story = core.build_each(self.follow, one)
+        self.assertEqual((story['title'], story['author'], story['series'], story['series_index']), ('The Lake House, Part 3', 'writer7', 'The Lake House', 3.0))
+        self.assertEqual(story['tags'], ['Reddit', 'r/gayincest_stories', 'TRUE STORY', 'Brother/In-Law/Step'])
+        self.assertEqual(story['id'], 'reddit-t3_007')
+        self.assertEqual(len(story['sections']), 1)
+        self.assertNotIn('series', core.build_each(self.follow, self.story_post(8, 'Just a title')))
+        self.assertNotIn('series', core.build_each(self.follow, self.story_post(8, 'Ch 2')), 'a stem too short to name a series is ignored')
+        core.build_epub(story)
+
+    def test_listing_keeps_the_flair(self):
+        listing = json.dumps({'data': {'after': None, 'children': [{'kind': 't3', 'data': {
+            'name': 't3_a', 'title': 'T', 'author': 'w', 'created_utc': 1.0, 'permalink': '/r/x/comments/a/t/',
+            'selftext_html': '<div class="md"><p>Hi.</p></div>', 'link_flair_text': 'FICTION - Cousin'}}]}})
+        self.assertEqual(core.parse_listing(listing)[0][0]['flair'], 'FICTION - Cousin')
+
+
 class ProbeTests(unittest.TestCase):
     SRC = core.parse_source('r/HFY')
 
