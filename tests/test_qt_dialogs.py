@@ -502,6 +502,7 @@ class RedditPluginTests(QtCase):
         self.assertEqual((follow['name'], follow['source']['user'], follow['author_filter']), ('Out of Cruel Space', 'KyleKKent', 'KyleKKent'))
         self.assertFalse(follow['author_note'], 'author comments are opt-in')
         self.assertIn('docs.google.com/spreadsheets', follow['index_url'], 'the preset brings the public chapter index')
+        self.assertTrue(follow['title_from_body'], 'the preset names chapters from the title line each post opens with')
         bad = self.ui.FollowDialog(None)
         bad.source.setText('u/KyleKKent')
         bad.index_url.setText('https://example.com/nope')

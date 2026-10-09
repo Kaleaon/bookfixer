@@ -291,6 +291,65 @@ class AuthorNoteTests(unittest.TestCase):
         self.assertFalse(core.due(dict(follow, notes_pending=False), 6, now=1000.0 + 1000))
 
 
+class OpeningTests(unittest.TestCase):
+    """How HFY's Out of Cruel Space opens its posts: a title line, sometimes a ~First~ marker and a note in brackets."""
+
+    def test_title_notes_and_markers_in_any_order(self):
+        cases = {
+            '<p>The Pirates &amp; The Bounty Hunters</p><p>\u200b</p><p>\u201cDamn they\u2019ve been here.\u201d Air-Farce remarks.</p>':
+                ('The Pirates & The Bounty Hunters', [], '<p>\u201cDamn they\u2019ve been here.\u201d Air-Farce remarks.</p>'),
+            '<p>(Today is just full of Derps.)</p><p>Capes and Conundrums</p><p>\u200b</p><p>He sat down.</p>':
+                ('Capes and Conundrums', ['Today is just full of Derps.'], '<p>He sat down.</p>'),
+            '<p>The Pirates</p><p>(I am so sorry, my brain clunked.)</p><p>\u201cAlright.\u201d</p>':
+                ('The Pirates', ['I am so sorry, my brain clunked.'], '<p>\u201cAlright.\u201d</p>'),
+            '<p>~First~</p><p>HHH/Herbert\u2019s Hundred Harem</p><p>He walked.</p>': ('HHH/Herbert\u2019s Hundred Harem', [], '<p>He walked.</p>'),
+            '<p>Danger Zone!</p><p>He ran.</p>': ('Danger Zone!', [], '<p>He ran.</p>'),
+            '<p>Miles Brent sighed to himself as he laid on the hard floor.</p><p>Next.</p>':
+                ('', [], '<p>Miles Brent sighed to himself as he laid on the hard floor.</p><p>Next.</p>'),
+            '<p>Run!</p><p>He ran.</p>': ('', [], '<p>Run!</p><p>He ran.</p>'),
+            '<p>\u201cHello there,\u201d he said</p><p>x</p>': ('', [], '<p>\u201cHello there,\u201d he said</p><p>x</p>'),
+            '<p>(Part of a longer aside that never closes</p><p>x</p>': ('', [], '<p>(Part of a longer aside that never closes</p><p>x</p>'),
+        }
+        for html, want in cases.items():
+            self.assertEqual(core.split_opening(html), want, html[:50])
+        self.assertEqual(core.split_body_title('<p>Title Here</p><p>He ran.</p>'), ('Title Here', '<p>He ran.</p>'))
+
+    def test_notes_become_a_boxed_aside_in_front_and_the_authors_comment_one_behind(self):
+        post = {'html': '<p>The Pirates</p><p>(Sorry, a short one today.)</p><p>Chapter text.</p>', 'note': '<p>Thanks for reading! <a href="https://x.example/">Wiki</a></p>'}
+        plain = core.chapter_html(post)
+        self.assertTrue(plain.startswith('<p>The Pirates</p>'), 'without the option the post is left as written')
+        html = core.chapter_html(post, True)
+        self.assertTrue(html.startswith('<div class="author-note"><p class="author-note-label">Author\'s note</p><p>Sorry, a short one today.</p></div><p>Chapter text.</p>'))
+        self.assertTrue(html.endswith('</p></div>') and "Author's comment" in html and 'Thanks for reading!' in html)
+        self.assertNotIn('The Pirates', html)
+        import storykit
+        cleaned = storykit.clean_fragment(html)
+        self.assertIn('<div class="author-note">', cleaned)
+        self.assertIn('<p class="author-note-label">', cleaned)
+        self.assertNotIn('class="evil"', storykit.clean_fragment('<div class="evil"><p>x</p></div>'), 'other classes are still dropped')
+        self.assertIn('.author-note', storykit.CSS)
+
+    def test_chapters_are_named_from_the_title_line_with_or_without_the_index(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        follow = core.new_follow('Out of Cruel Space', 'u/KyleKKent', '', 'KyleKKent', title_from_body=True)
+        cache = core.ChapterCache(tmp.name, follow['id'])
+        posts = [{'id': 't3_a', 'title': 'Out of Cruel Space, Part 59', 'author': 'KyleKKent', 'created': 1625000000.0, 'link': '', 'flair': 'OC',
+                  'html': '<p>The Pirates &amp; The Bounty Hunters</p><p>\u200b</p><p>Text one.</p>'},
+                 {'id': 't3_b', 'title': 'Out of Cruel Space, Part 1', 'author': 'KyleKKent', 'created': 1621000000.0, 'link': '', 'flair': 'OC',
+                  'html': '<p>Miles Brent sighed to himself as he laid on the hard floor.</p>'}]
+        cache.posts.update({p['id']: p for p in posts})
+        sections = core.build_story(follow, cache)['sections']
+        self.assertEqual([t for t, _ in sections], ['Out of Cruel Space, Part 1', 'Out of Cruel Space, Part 59 \u2013 The Pirates & The Bounty Hunters'])
+        self.assertEqual(sections[1][1], '<p>Text one.</p>', 'the title is not repeated in the text')
+        cache.data['index'] = {'url': 'u', 'fetched': 1, 'error': '', 'rows': [
+            {'n': 59, 'label': 'Chapter 059', 'note': 'Pirates; Bounty Hunters', 'ts': 1625000000.0}, {'n': 1, 'label': 'Chapter 001', 'note': 'Pirates', 'ts': 1621000000.0}]}
+        self.assertEqual([t for t, _ in core.build_story(follow, cache)['sections']],
+                         ['Chapter 001', 'Chapter 059 \u2013 The Pirates & The Bounty Hunters'], 'the title line replaces the sheet\'s storyline note')
+        off = core.new_follow('x', 'u/KyleKKent', '', 'KyleKKent')
+        self.assertEqual(core.build_story(off, cache)['sections'][1][0], 'Chapter 059 \u2013 Pirates; Bounty Hunters')
+
+
 class IndexTests(unittest.TestCase):
     """A public chapter-list sheet (shape taken from the real Out of Cruel Space index) names chapters and catches mistitled posts."""
     CSV = ('Out of Cruel Space (an extension of the archive),,,,\n'

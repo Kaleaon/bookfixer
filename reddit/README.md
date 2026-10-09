@@ -52,6 +52,16 @@ Checked on the real r/HFY: the top-of-all-time list showed 121 parts of *The Nat
 
 What it cannot do: it knows a series only by its author and title, so parts retitled partway (as Out of Cruel Space was) need the *Title contains* box adjusted by hand; a series with tag-only titles such as `[Jenkinsverse] 5.` shows up as pieces; and parts posted by several authors are not joined. Search and browse use Reddit's search, which returns only the first pages (the dialog looks through three).
 
+## Chapter titles and author's notes from the post itself
+
+Out of Cruel Space opens every post with its chapter title, such as `The Pirates & The Bounty Hunters` (Part 59), `Capes and Conundrums` or `Danger Zone!`, followed by an empty line. Tick *The first line of each post is its chapter title* (on in the Quick start) and the plugin:
+
+- names the chapter from it: `Chapter 059 – The Pirates & The Bounty Hunters` with the chapter index, `Out of Cruel Space, Part 59 – The Pirates & The Bounty Hunters` without it;
+- takes the line out of the text so it is not printed twice, and drops the empty zero-width paragraphs (these blank paragraphs are removed from every chapter now);
+- drops comment-race markers such as `~First~`, and turns a note to readers in brackets, for example `(I am so sorry, my brain clunked HARD and remained BLANK today.)`, into a boxed **Author's note** at the top of the chapter. The author's own comment (the optional setting above) is a boxed **Author's comment** at the end.
+
+A line counts as the title only if it is short (80 characters or fewer), does not end like a sentence, is not a quotation and has no brackets; a title ending in `!` must be capitalised like a title (`Danger Zone!`, but not `Run!`). Checked on the real series: 1,748 of 1,802 posts have a title line (the first ~45 chapters mostly have none and keep their `Part N` name), 76 distinct titles, 328 posts with a bracketed note. The titles repeat (`A Scion of Many Worlds` heads 181 chapters, `The Bounty Hunters` 172), so they work as a storyline name more than a unique chapter title; the index's chapter number still tells chapters apart. A note that shares a paragraph with a marker (`~First~ (note)`) is left in the text, and the box styling depends on your e-reader supporting the book's stylesheet.
+
 ## Chapter index (a public spreadsheet)
 
 *Chapter index* in the Add/Edit dialog takes the address of a public Google Sheet that lists a series' chapters with the columns **Date, Author, Chapter** and (optionally) **Note**. The plugin reads it (at most once a day, as CSV; the sheet must be shared so anyone with the link can view it) and:

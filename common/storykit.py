@@ -102,6 +102,7 @@ def strip_tags(fragment):
 
 BLOCKS = {'p', 'div', 'blockquote', 'ul', 'ol', 'li', 'hr', 'pre', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
 INLINE = {'em', 'strong', 'i', 'b', 'u', 's', 'sub', 'sup', 'span', 'a', 'small', 'big'}
+ALLOWED_CLASSES = {'author-note', 'author-note-label'}  # set by our own plugins for a boxed aside; any other class is dropped
 RENAME = {'strike': 's', 'del': 's', 'center': 'div', 'cite': 'em'}
 VOID = {'br', 'hr'}
 DROP_CONTENT = {'script', 'style', 'head', 'title'}
@@ -169,7 +170,8 @@ class Cleaner(HTMLParser):
             if tag == 'li' and 'li' in self.stack:
                 self._close_to('li')
             style = safe_style(attrs.get('style'))
-            self.out.append(f'<{tag}' + (f' style={quoteattr(style)}' if style else '') + '>')
+            css_class = attrs.get('class') if attrs.get('class') in ALLOWED_CLASSES and tag in ('div', 'p') else None
+            self.out.append(f'<{tag}' + (f' class={quoteattr(css_class)}' if css_class else '') + (f' style={quoteattr(style)}' if style else '') + '>')
             self.stack.append(tag)
         elif tag in INLINE:
             self._ensure_paragraph()
@@ -228,6 +230,9 @@ p { margin: 0 0 0.8em 0; }
 .byline, .meta { text-align: center; }
 .summary { font-style: italic; text-align: center; }
 hr { margin: 1.5em 0; }
+.author-note { margin: 1em 1.5em; padding: 0.4em 0.9em; border-left: 3px solid #888; font-size: 0.9em; }
+.author-note p { margin: 0.3em 0; }
+.author-note-label { font-weight: bold; font-size: 0.8em; letter-spacing: 0.05em; text-transform: uppercase; }
 '''
 
 XHTML = ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'

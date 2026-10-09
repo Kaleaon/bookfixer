@@ -101,7 +101,8 @@ PRESETS = [
      # the author renamed the series part-way: "Out of Cruel Space, Part N" became "OOCS, Into A Wider Galaxy, Part N"
      'title_filter': 're:^\\s*(Out of Cruel Space|OOCS)\\b.*\\d', 'author_filter': 'KyleKKent',
      # a fan-kept public chapter list (date, author, chapter, storyline) that names every chapter and fixes mistitled posts
-     'index_url': 'https://docs.google.com/spreadsheets/d/1IipEkkuMzpfhVlQh0BhOcrmHlguHBZhSKSLTwRhYDf8/edit?gid=1375133682'},
+     'index_url': 'https://docs.google.com/spreadsheets/d/1IipEkkuMzpfhVlQh0BhOcrmHlguHBZhSKSLTwRhYDf8/edit?gid=1375133682',
+     'title_from_body': True},  # each post opens with its chapter title, e.g. 'The Pirates & The Bounty Hunters'
     # many authors, one story per post, each with a flair; every post becomes its own book (newest few on the first check)
     {'label': 'r/gayincest_stories (each post as its own book)', 'name': 'r/gayincest_stories', 'source': 'r/gayincest_stories',
      'title_filter': '', 'author_filter': '', 'flair_filter': '', 'layout': 'each'},
@@ -538,8 +539,8 @@ def match_index(posts, rows):
     return matched, free, still
 
 
-def index_title(row, fallback):
-    return row['label'] + (f" \u2013 {row['note']}" if row['note'] else '') if row else fallback
+def index_title(row, fallback, with_note=True):
+    return row['label'] + (f" \u2013 {row['note']}" if row['note'] and with_note else '') if row else fallback
 
 
 def refresh_index(source, follow, cache, now=time.time):
@@ -601,11 +602,11 @@ def probe(source, src, follow=None, limit=25):
 
 # ---------------------------------------------------------------- follows, filters, and the chapter cache
 
-def new_follow(name, source_text, title_filter='', author_filter='', author_note=False, layout='series', flair_filter='', index_url=''):
+def new_follow(name, source_text, title_filter='', author_filter='', author_note=False, layout='series', flair_filter='', index_url='', title_from_body=False):
     src = parse_source(source_text)
     return {'id': uuid.uuid4().hex[:10], 'name': name.strip() or describe_source(src), 'source': src,
             'title_filter': title_filter.strip(), 'author_filter': author_filter.strip().lstrip('/').replace('u/', '', 1),
-            'author_note': bool(author_note), 'layout': 'each' if layout == 'each' else 'series', 'flair_filter': flair_filter.strip(), 'index_url': index_url.strip(),
+            'author_note': bool(author_note), 'layout': 'each' if layout == 'each' else 'series', 'flair_filter': flair_filter.strip(), 'index_url': index_url.strip(), 'title_from_body': bool(title_from_body),
             'last_checked': 0.0, 'last_status': ''}
 
 
@@ -778,10 +779,76 @@ def fetch_notes(source, follow, cache, cancelled=lambda: False, progress=lambda 
     return len(todo) - done
 
 
-def chapter_html(post):
-    body = post['html'] or '<p>(empty)</p>'
+_ZERO_WIDTH = '\u200b\u200c\u200d\ufeff'
+_BLANK_PARA = re.compile(r'<p>(?:\s|&nbsp;|&#8203;|&#x200[bB];|[' + _ZERO_WIDTH + r'])*</p>')
+_PARA = re.compile(r'<p>(.*?)</p>', re.S)
+_MARKER = re.compile(r'(?i)^[~*\[(]*\s*(?:first|second|third|early|1st)\s*[~*\])]*[.!]*$')
+
+
+def _plain(fragment):
+    return re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', '', fragment))).strip(' ' + _ZERO_WIDTH)
+
+
+def _looks_like_title(text):
+    if len(text) > 80 or '(' in text or text.startswith(('"', '\u201c', '\u2018')):
+        return False
+    if text.endswith('!'):  # "Danger Zone!" is a title, "Run!" is not: every longer word must be capitalised
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z'\u2019]+", text) if len(w) > 3]
+        return bool(words) and all(w[0].isupper() for w in words)
+    return not text.endswith(('.', '?', ',', ';', ':', '"', '\u201d', '\u2026'))
+
+
+def split_opening(body_html):
+    """Look at how a post opens. Returns (title, notes, body). Some authors open every post with its chapter title (a short line
+    without sentence punctuation), maybe with a comment-race marker like ~First~ and a parenthesised note to readers, in any
+    order. The title and the markers are taken out, the notes (text in brackets, shown without them) are returned separately
+    as HTML, and empty paragraphs are dropped. A post that does not open that way comes back unchanged apart from blank paragraphs."""
+    body_html = _BLANK_PARA.sub('', body_html)
+    title, notes, cut, end = '', [], [], 0
+    for number, match in enumerate(_PARA.finditer(body_html)):
+        if number >= 4:
+            break
+        text = _plain(match.group(1))
+        if _MARKER.match(text):
+            cut.append(match.span())
+        elif text.startswith('(') and text.endswith(')') or (text.startswith('[') and text.endswith(']') and len(text) > 40):
+            inner = match.group(1).strip()
+            if inner[:1] in '([' and inner[-1:] in ')]':
+                inner = inner[1:-1].strip()
+            notes.append(inner)
+            cut.append(match.span())
+        elif not title and _looks_like_title(text):
+            title = text
+            cut.append(match.span())
+        else:
+            break
+    if not title and not notes and not cut:
+        return '', [], body_html
+    for start, stop in reversed(cut):
+        body_html = body_html[:start] + body_html[stop:]
+    return title, notes, body_html
+
+
+def split_body_title(body_html):
+    """(title, body with the title, markers and notes taken out); see split_opening."""
+    title, _, body = split_opening(body_html)
+    return title, body
+
+
+def author_aside(label, parts):
+    return f'<div class="author-note"><p class="author-note-label">{label}</p>' + ''.join(
+        part if part.lstrip().startswith('<') else f'<p>{part}</p>' for part in parts) + '</div>'
+
+
+def chapter_html(post, title_from_body=False):
+    body, notes = _BLANK_PARA.sub('', post['html'] or ''), []
+    if title_from_body:
+        _, notes, body = split_opening(body)
+    body = body or '<p>(empty)</p>'
+    if notes:
+        body = author_aside("Author's note", notes) + body
     if post.get('note'):
-        body += '<hr/><p><em>Author\'s comment</em></p>' + post['note']
+        body += author_aside("Author's comment", [post['note']])
     return body
 
 
@@ -790,17 +857,21 @@ def build_story(follow, cache):
     posts = cache.ordered()
     if not posts:
         raise ValueError('Nothing has been collected for this series yet.')
-    titles = {}
+    titles, from_body = {}, follow.get('title_from_body')
     if (cache.data.get('index') or {}).get('rows'):
         matched, _, _ = match_index(posts, cache.data['index']['rows'])
-        titles = {pid: index_title(row, None) for pid, row in matched.items()}
+        titles = {pid: index_title(row, None, with_note=not from_body) for pid, row in matched.items()}
+    def section(p):
+        name = titles.get(p['id']) or p['title']
+        chapter = split_body_title(p['html'] or '')[0] if from_body else ''
+        return (f'{name} \u2013 {chapter}' if chapter else name), chapter_html(p, from_body)
     author = Counter(p['author'] for p in posts).most_common(1)[0][0] or 'Unknown'
     last = datetime.fromtimestamp(posts[-1]['created'], timezone.utc).date().isoformat()
     first = datetime.fromtimestamp(posts[0]['created'], timezone.utc).date().isoformat()
     src = follow['source']
     tags = ['Reddit'] + ([f"r/{src['subreddit']}"] if src.get('subreddit') else [])
     return {'id': 'reddit-' + follow['id'], 'url': posts[-1]['link'] or WWW, 'title': follow['name'], 'author': author,
-            'sections': [(titles.get(p['id']) or p['title'], chapter_html(p)) for p in posts], 'tags': tags, 'categories': [],
+            'sections': [section(p) for p in posts], 'tags': tags, 'categories': [],
             'summary': f"{len(posts)} chapters collected from Reddit ({describe_source(src)}), {first} to {last}.",
             'publisher': PUBLISHER, 'pubdate': first}
 

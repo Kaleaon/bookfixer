@@ -68,6 +68,11 @@ class FollowDialog(QDialog):
             self.layout_box.setCurrentIndex(1)
         form.addRow('Make', self.layout_box)
         layout.addLayout(form)
+        self.title_from_body = QCheckBox('The first line of each post is its chapter title (use it to name the chapter)')
+        self.title_from_body.setToolTip('For authors who open every post with a short title line. The line becomes the chapter name and is taken out of the text; '
+                                        'a note in brackets next to it becomes a boxed author\'s note; posts that do not open that way keep their own title.')
+        self.title_from_body.setChecked(bool(follow and follow.get('title_from_body')))
+        layout.addWidget(self.title_from_body)
         self.author_note = QCheckBox("Also keep the author's own comment under each chapter (official API only)")
         self.author_note.setToolTip('Authors often use their comment for notes, prefaces or links. Costs one extra request per chapter, '
                                     'so a long series takes a while on the first pass; reader comments are not included.')
@@ -96,6 +101,7 @@ class FollowDialog(QDialog):
         self.author_filter.setText(preset['author_filter'])
         self.flair_filter.setText(preset.get('flair_filter', ''))
         self.index_url.setText(preset.get('index_url', ''))
+        self.title_from_body.setChecked(bool(preset.get('title_from_body')))
         self.layout_box.setCurrentIndex(1 if preset.get('layout') == 'each' else 0)
 
     def check_source(self, *_):
@@ -128,9 +134,11 @@ class FollowDialog(QDialog):
         """A new follow, or the edited existing one (keeping its id and history)."""
         if self.follow is None:
             return core.new_follow(self.name.text(), self.source.text(), self.title_filter.text(), self.author_filter.text(), self.author_note.isChecked(),
-                                  self.layout_box.currentData(), self.flair_filter.text(), self.index_url.text())
+                                  self.layout_box.currentData(), self.flair_filter.text(), self.index_url.text(),
+                                  self.title_from_body.isChecked())
         updated = core.new_follow(self.name.text() or self.follow['name'], self.source.text(), self.title_filter.text(), self.author_filter.text(), self.author_note.isChecked(),
-                                  self.layout_box.currentData(), self.flair_filter.text(), self.index_url.text())
+                                  self.layout_box.currentData(), self.flair_filter.text(), self.index_url.text(),
+                                  self.title_from_body.isChecked())
         updated.update(id=self.follow['id'], last_checked=0.0, last_status='changed; will be checked again')
         return updated
 
