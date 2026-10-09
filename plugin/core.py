@@ -44,9 +44,12 @@ def image_pdf_to_cbz(data):
         source = Path(tmp) / 'source.pdf'
         source.write_bytes(data)
         try:
-            import fitz
+            import pymupdf as fitz  # the current name of PyMuPDF's module; "fitz" is deprecated and an unrelated package shares it
         except ImportError:
-            fitz = None
+            try:
+                import fitz  # older PyMuPDF releases only provide this name
+            except ImportError:
+                fitz = None
         if fitz is not None:
             with fitz.open(source) as doc:
                 if doc.needs_pass:

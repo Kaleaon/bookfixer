@@ -54,7 +54,13 @@ class RecoveryTests(unittest.TestCase):
             self.assertFalse((Path(d) / 'evil.pdf').exists())
 
     def test_text_pdf_preserved_and_image_pdf_converted(self):
-        import fitz
+        try:
+            import pymupdf as fitz
+        except ImportError:
+            try:
+                import fitz
+            except ImportError:
+                self.skipTest('PyMuPDF is not installed (pip install pymupdf)')
         with fitz.open() as doc:
             page = doc.new_page(); page.insert_text((72, 72), 'Readable book text')
             self.assertIsNone(core.image_pdf_to_cbz(doc.tobytes()))
