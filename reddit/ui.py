@@ -264,6 +264,123 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
+class DiscoverDialog(QDialog):
+    """Search or browse a subreddit such as r/HFY, see the stories grouped into series, and follow a whole series."""
+
+    def __init__(self, parent, action):
+        super().__init__(parent)
+        self.action = action
+        self.chosen = None
+        self.groups = []
+        self.setWindowTitle('Find stories on Reddit')
+        self.resize(820, 520)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.subreddit = QLineEdit('HFY')
+        form.addRow('Subreddit', self.subreddit)
+        self.words = QLineEdit()
+        self.words.setPlaceholderText('Search words, for example deathworld, or leave empty to browse')
+        self.words.returnPressed.connect(self.search)
+        form.addRow('Search words', self.words)
+        self.browse = QComboBox()
+        for key, label in core.BROWSE:
+            self.browse.addItem(label, key)
+        self.browse.setCurrentIndex(1)
+        form.addRow('Order', self.browse)
+        self.flair = QLineEdit()
+        self.flair.setPlaceholderText('Only this flair, for example OC-FirstOfSeries (official API only; optional)')
+        form.addRow('Flair contains', self.flair)
+        layout.addLayout(form)
+        row = QHBoxLayout()
+        go = QPushButton('Search')
+        go.clicked.connect(self.search)
+        row.addWidget(go)
+        self.message = QLabel('Series are guessed from the author and the part numbers in the titles (Part 3, 14, VIII).')
+        self.message.setWordWrap(True)
+        row.addWidget(self.message, 1)
+        layout.addLayout(row)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(['Series or story', 'Author', 'Posts found', 'Parts seen', 'Flair'])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 330)
+        self.table.doubleClicked.connect(lambda *_: self.follow_selected())
+        layout.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        self.follow_button = QPushButton('Follow the whole series…')
+        self.follow_button.setToolTip('Looks through the author\'s posts for every part, shows what it found, then lets you adjust and follow it')
+        self.follow_button.clicked.connect(self.follow_selected)
+        row.addWidget(self.follow_button)
+        row.addStretch(1)
+        layout.addLayout(row)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def search(self):
+        try:
+            src = core.discover_source(self.subreddit.text(), self.words.text(), self.browse.currentData())
+        except core.SourceError as exc:
+            self.message.setText(str(exc))
+            return
+        flair = self.flair.text().strip()
+        try:
+            task = run_task(self, 'Searching Reddit…', lambda t: core.discover(
+                self.action.make_source(t.cancelled), src, flair, cancelled=t.cancelled, progress=lambda msg: setattr(t, 'status', msg)))
+        except core.SourceError as exc:
+            self.message.setText(str(exc))
+            return
+        if task.error:
+            self.message.setText(f'The search failed: {task.error}')
+            return
+        if task.result is None:
+            return
+        self.groups = task.result
+        self.table.setRowCount(len(self.groups))
+        for row, g in enumerate(self.groups):
+            nums = sorted(g['numbers'])
+            parts = f'{nums[0]}\u2013{nums[-1]}' if len(nums) > 1 else (str(nums[0]) if nums else '')
+            for col, text in enumerate([g['name'] + ('' if g['is_series'] else '  (single story)'), g['author'], str(len(g['posts'])), parts,
+                                        ', '.join(sorted(g['flairs']))[:40]]):
+                self.table.setItem(row, col, QTableWidgetItem(text))
+        series = sum(1 for g in self.groups if g['is_series'])
+        self.message.setText(f'{series} series and {len(self.groups) - series} single stories among the posts looked through. '
+                             'Counts are only what the search showed; following a series reads all of its parts.' if self.groups
+                             else 'Nothing found. Try other words, another order, or no flair.')
+
+    def follow_selected(self):
+        rows = self.table.selectionModel().selectedRows()
+        if len(rows) != 1:
+            self.message.setText('Select one series in the list first.')
+            return
+        group = self.groups[rows[0].row()]
+        follow = core.series_follow(group)
+        try:
+            task = run_task(self, 'Looking for every part…', lambda t: core.preview_series(
+                self.action.make_source(t.cancelled), follow, cancelled=t.cancelled, progress=lambda msg: setattr(t, 'status', msg)))
+        except core.SourceError as exc:
+            self.message.setText(str(exc))
+            return
+        if task.error:
+            self.message.setText(f'Looking for the parts failed: {task.error}')
+            return
+        if task.result is None:
+            return
+        found = task.result
+        if not found['count']:
+            self.message.setText('That author has no posts under this name any more.')
+            return
+        text = (f"{follow['name']} by {group['author']}: {found['count']} post(s) from {found['first']} to {found['last']}.\n\n"
+                + '\n'.join(found['titles']) + '\n\nFollow it as one book that grows?')
+        if QMessageBox.question(self, 'Follow this series?', text) != QMessageBox.StandardButton.Yes:
+            return
+        dialog = FollowDialog(self, follow)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.chosen = dialog.result_follow()
+            self.accept()
+
+
 class ManageDialog(QDialog):
     """The list of followed stories, with add, edit, remove and check buttons."""
     COLUMNS = ['Book', 'Following', 'Chapters', 'Last checked', 'Status']
@@ -283,7 +400,7 @@ class ManageDialog(QDialog):
         self.mode_label = QLabel('')
         layout.addWidget(self.mode_label)
         row = QHBoxLayout()
-        for label, slot in (('Add…', self.add), ('Edit…', self.edit), ('Remove', self.remove), ('Test selected', self.test_selected), ('Check selected now', self.check_selected),
+        for label, slot in (('Find stories…', self.find), ('Add…', self.add), ('Edit…', self.edit), ('Remove', self.remove), ('Test selected', self.test_selected), ('Check selected now', self.check_selected),
                             ('Check all now', self.check_all), ('Settings…', self.settings)):
             button = QPushButton(label)
             button.clicked.connect(slot)
@@ -316,6 +433,10 @@ class ManageDialog(QDialog):
     def selected_ids(self):
         rows = {i.row() for i in self.table.selectedItems()}
         return [self.table.item(r, 0).data(Qt.ItemDataRole.UserRole) for r in sorted(rows)]
+
+    def find(self):
+        self.action.discover()
+        self.refresh()
 
     def add(self):
         dialog = FollowDialog(self)

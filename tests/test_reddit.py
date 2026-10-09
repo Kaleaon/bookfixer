@@ -291,6 +291,93 @@ class AuthorNoteTests(unittest.TestCase):
         self.assertFalse(core.due(dict(follow, notes_pending=False), 6, now=1000.0 + 1000))
 
 
+class DiscoveryTests(unittest.TestCase):
+    """Finding stories, and whole series, on a subreddit like r/HFY (title shapes taken from its real top posts)."""
+
+    def test_part_numbers_in_the_shapes_hfy_uses(self):
+        cases = {
+            'The Nature of Predators 14': ('The Nature of Predators', 14),
+            'Why Humans Avoid War VIII': ('Why Humans Avoid War', 8),
+            'Why Humans Avoid War': ('Why Humans Avoid War', None),
+            'Out of Cruel Space, Part 12': ('Out of Cruel Space', 12),
+            'Salvage - Chapter 7': ('Salvage', 7),
+            'Salvage (12)': ('Salvage', 12),
+            'Salvage #12': ('Salvage', 12),
+            'A job for a deathworlder [Chapter 7]': ('A job for a deathworlder', 7),
+            'The Nature of Predators 2-99 [Final]': ('The Nature of Predators', 2),
+            '[OC][Jenkinsverse] - Salvage 31': ('Salvage', 31),
+            'Chrysalis 16: The Return': ('Chrysalis', 16),
+            'The Civil War': ('The Civil War', None),
+            'What Am I': ('What Am', 1),
+            'A Silly Thought\u2026': ('A Silly Thought\u2026', None),
+        }
+        for title, want in cases.items():
+            self.assertEqual(core.series_parts(title), want, title)
+
+    def test_tag_only_titles_keep_their_tags_as_the_name(self):
+        self.assertEqual(core.series_parts('[OC][JVerse] 4: Quarantine'), ('[OC][JVerse]', 4))
+        self.assertEqual(core.series_parts('[OC][Jenkinsverse] Chapter 7'), ('[OC][Jenkinsverse]', 7))
+
+    def posts(self):
+        def p(i, title, author='Alpha', flair='OC', created=None, html='<p>x</p>'):
+            return {'id': f't3_{i}', 'title': title, 'author': author, 'flair': flair, 'created': created or 1700000000.0 + i, 'html': html, 'link': ''}
+        return [p(1, 'Salvage 3'), p(2, 'Salvage 1'), p(3, '[OC] Salvage 2'), p(4, 'Salvage 3'), p(5, 'Lone story'),
+                p(6, 'Salvage 9', author='Bravo'), p(7, 'Salvage 10', author='Bravo'), p(8, 'Opener', flair='OC-FirstOfSeries'),
+                p(9, 'Opener 2', flair='OC-Series'), p(10, 'Picture', html=''), p(11, 'Hello 2', author='Cee')]
+
+    def test_grouping_by_author_and_name(self):
+        groups = core.group_series(self.posts())
+        by = {(g['author'], g['name']): g for g in groups}
+        salvage = by[('Alpha', 'Salvage')]
+        self.assertTrue(salvage['is_series'])
+        self.assertEqual((sorted(salvage['numbers']), len(salvage['posts'])), ([1, 2, 3], 4), 'a repeated post number is kept, tags in front do not split it')
+        self.assertTrue(by[('Bravo', 'Salvage')]['is_series'], 'the same name by another author is a different series')
+        self.assertTrue(by[('Alpha', 'Opener')]['is_series'], 'a series flair counts with two posts')
+        self.assertFalse(by[('Alpha', 'Lone story')]['is_series'])
+        self.assertFalse(by[('Cee', 'Hello')]['is_series'], 'one numbered post is not yet a series')
+        self.assertNotIn('Picture', [g['name'] for g in groups], 'posts without story text are ignored')
+        self.assertTrue(all(g['is_series'] for g in groups[:3]) and not groups[-1]['is_series'], 'series come first')
+        self.assertEqual([p['id'] for p in salvage['posts']], ['t3_1', 't3_2', 't3_3', 't3_4'], 'posts are listed by date')
+
+    def test_follow_for_a_series_matches_its_parts_and_not_other_stories(self):
+        group = [g for g in core.group_series(self.posts()) if g['name'] == 'Salvage' and g['author'] == 'Alpha'][0]
+        follow = core.series_follow(group)
+        self.assertEqual((follow['name'], follow['source']['user'], follow['author_filter'], follow['layout']), ('Salvage', 'Alpha', 'Alpha', 'series'))
+        def hit(title, author='Alpha'):
+            return core.matches({'title': title, 'author': author, 'html': '<p>x</p>', 'flair': ''}, follow)
+        for title in ('Salvage', 'Salvage 40', '[OC][Jenkinsverse] - Salvage 41', 'Salvage, Part 42: The End', '(OC) Salvage 43'):
+            self.assertTrue(hit(title), title)
+        for title in ('Salvaged goods 1', 'Not Salvage 3'):
+            self.assertFalse(hit(title), title)
+        self.assertFalse(hit('Salvage 5', author='Bravo'))
+
+    def test_discover_source(self):
+        self.assertEqual(core.discover_source('r/HFY', 'deathworld', 'top-year'),
+                         {'kind': 'search', 'subreddit': 'HFY', 'user': '', 'query': 'deathworld', 'sort': 'top', 't': 'year'})
+        self.assertEqual(core.discover_source('HFY', '', 'top-all')['sort'], 'top')
+        self.assertEqual(core.discover_source('HFY', '', 'relevance')['sort'], 'top', 'browsing without words has no relevance, so top')
+        self.assertEqual(core.discover_source('HFY', '', 'new')['sort'], 'new')
+        with self.assertRaises(core.SourceError):
+            core.discover_source('not a name!', 'x')
+        self.assertIn('/r/HFY/top?', core.api_path(core.discover_source('HFY', '', 'top-month')))
+        self.assertIn('t=month', core.api_path(core.discover_source('HFY', '', 'top-month')))
+        self.assertIn('sort=relevance', core.api_path(core.discover_source('HFY', 'x', 'relevance')))
+        self.assertIn('/r/HFY/new?', core.api_path(core.parse_source('r/HFY')), 'following still reads the newest')
+
+    def test_discover_reads_pages_filters_flair_and_the_preview_finds_the_whole_series(self):
+        pages = [dict(p) for p in self.posts()]
+        source = FakeSource(pages, per_page=4)
+        groups = core.discover(source, {'kind': 'subreddit', 'subreddit': 'HFY'}, pages=2)
+        self.assertEqual(len(source.calls), 2, 'only the pages asked for')
+        only = core.discover(FakeSource(pages, per_page=20), {'kind': 'subreddit'}, flair='FirstOf')
+        self.assertEqual([g['name'] for g in only], ['Opener'])
+        history = [dict(self.posts()[0], id=f't3_h{n}', title=f'Salvage {n}', created=1600000000.0 + n * 86400) for n in range(1, 61)]
+        follow = core.series_follow([g for g in core.group_series(self.posts()) if g['name'] == 'Salvage' and g['author'] == 'Alpha'][0])
+        seen = core.preview_series(FakeSource(history, per_page=25), follow)
+        self.assertEqual((seen['count'], seen['first'], seen['last']), (60, '2020-09-14', '2020-11-12'))
+        self.assertIn('Salvage 1', seen['titles'][0])
+
+
 class EachPostTests(unittest.TestCase):
     """A subreddit of stand-alone stories by many authors: every post becomes its own book."""
 

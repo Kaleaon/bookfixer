@@ -119,11 +119,14 @@ def source_text(src):
 
 def _listing_path(src):
     if src['kind'] == 'subreddit':
-        return f"/r/{src['subreddit']}/new", {}
+        sort = src.get('sort', 'new')  # discovery browses the top of a subreddit; following always reads the newest
+        return f"/r/{src['subreddit']}/{sort}", ({'t': src.get('t', 'all')} if sort == 'top' else {})
     if src['kind'] == 'user':
         return f"/user/{src['user']}/submitted", {'sort': 'new'}
     base = f"/r/{src['subreddit']}/search" if src['subreddit'] else '/search'
-    params = {'q': src['query'], 'sort': 'new'}
+    params = {'q': src['query'], 'sort': src.get('sort', 'new')}
+    if src.get('t') and params['sort'] in ('top', 'relevance'):
+        params['t'] = src['t']
     if src['subreddit']:
         params['restrict_sr'] = 'on'
     return base, params
@@ -328,6 +331,134 @@ def top_level_author_comment(json_text, author):
         if author and d.get('author', '').casefold() == author.casefold() and d.get('body_html'):
             return main_html(d['body_html'])
     return ''
+
+
+# ---------------------------------------------------------------- finding stories and whole series
+
+_ROMAN = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100}
+_PART_TAIL = re.compile(
+    r'^(?P<stem>.*?\S)[\s,:;\-\u2013\u2014(\[#]*'
+    r'(?i:(?:part|pt\.?|chapter|ch\.?|book|episode|ep\.?|volume|vol\.?)\s*)?'
+    r'(?P<num>\d{1,4}|(?-i:[IVXLC]{1,6}))\s*[)\]]?\s*(?:[:\-\u2013\u2014].*)?$')
+
+
+def _roman(text):
+    total = 0
+    for i, ch in enumerate(text):
+        value = _ROMAN[ch]
+        total += -value if i + 1 < len(text) and _ROMAN[text[i + 1]] > value else value
+    return total
+
+
+_LEAD_TAGS = r'(?:[\[(][^\])]{0,30}[\])]\s*[-\u2013\u2014:]*\s*)*'
+_LEAD_TAGS_RE = re.compile(r'^\s*' + _LEAD_TAGS)
+
+
+def series_parts(title):
+    """('Why Humans Avoid War', 8) for 'Why Humans Avoid War VIII'; (title, None) when the title carries no part number.
+    Reads trailing numbers (12, Part 12, Ch. 12, (12), #12) and capital Roman numerals, with an optional ': subtitle'."""
+    title = title.strip()
+    bare = _LEAD_TAGS_RE.sub('', title).strip()  # [OC] and [Universe] tags in front do not name the series...
+    if bare != title:
+        stem, number = _split_part(bare)
+        if re.search(r'[A-Za-z]{3}', stem) and not stem[0].isdigit() and not re.fullmatch(r'(?i)(?:part|pt|chapter|ch|book|episode|ep|volume|vol)\W*', stem):
+            return stem, number
+    return _split_part(title)  # ...unless nothing but a number is left once they are removed
+
+
+def _split_part(title):
+    m = _PART_TAIL.match(title)
+    if not m:
+        return title, None
+    num = m.group('num')
+    return m.group('stem').strip(' ,:;-\u2013\u2014'), (int(num) if num.isdigit() else _roman(num))
+
+
+def _stem_key(stem):
+    return re.sub(r'\W+', ' ', stem.casefold()).strip()
+
+
+def group_series(entries):
+    """Group posts into likely series by author and title stem. Returns groups, biggest first: {'name', 'author', 'posts',
+    'numbers', 'flairs', 'is_series'}. A group is a series when two different part numbers appear, or the posts carry a
+    'series' flair; everything else is a single story. Posts without story text (links, images) are left out."""
+    groups = {}
+    for e in entries:
+        if not e.get('html') or not e.get('title'):
+            continue
+        stem, number = series_parts(e['title'])
+        g = groups.setdefault((e.get('author', '').casefold(), _stem_key(stem)), {
+            'name': stem, 'author': e.get('author', ''), 'posts': {}, 'numbers': set(), 'flairs': set()})
+        g['posts'][e['id']] = e
+        if number is not None:
+            g['numbers'].add(number)
+        if e.get('flair'):
+            g['flairs'].add(e['flair'])
+    out = []
+    for g in groups.values():
+        g['posts'] = sorted(g['posts'].values(), key=lambda p: p['created'])
+        g['is_series'] = len(g['numbers']) >= 2 or any(re.search(r'(?i)series', f) for f in g['flairs']) and len(g['posts']) >= 2
+        out.append(g)
+    return sorted(out, key=lambda g: (-g['is_series'], -len(g['posts']), g['name'].casefold()))
+
+
+BROWSE = [('relevance', 'Best match for the search words'), ('top-all', 'Top of all time'), ('top-year', 'Top this year'),
+          ('top-month', 'Top this month'), ('new', 'Newest')]
+
+
+def discover_source(subreddit, words='', browse='relevance'):
+    """The listing to look through: a search (with words) or a browse of the subreddit's top or newest posts."""
+    subreddit = subreddit.strip().lstrip('/').replace('r/', '', 1).strip()
+    sort, _, period = browse.partition('-')
+    if not re.fullmatch(_NAME, subreddit or '-'):
+        raise SourceError('Enter a subreddit name such as HFY.')
+    if words.strip():
+        src = {'kind': 'search', 'subreddit': subreddit, 'user': '', 'query': words.strip(), 'sort': sort if sort in ('relevance', 'top', 'new') else 'relevance'}
+    else:
+        src = {'kind': 'subreddit', 'subreddit': subreddit, 'user': '', 'query': '', 'sort': sort if sort in ('top', 'new') else 'top'}
+    if period or src['sort'] == 'top':
+        src['t'] = period or 'all'
+    return src
+
+
+def discover(source, src, flair='', pages=3, cancelled=lambda: False, progress=lambda msg: None):
+    """Look through a few pages of a listing and group what is there into series and single stories."""
+    entries, after = [], None
+    for number in range(pages):
+        if cancelled():
+            raise Cancelled()
+        progress(f'Reading page {number + 1}')
+        found, after = source.page(src, after)
+        entries += [e for e in found if _text_matches(flair, e.get('flair', ''))]
+        if not found or not after:
+            break
+    return group_series(entries)
+
+
+def series_follow(group, author_note=False):
+    """A follow for a discovered series: the author's posts whose title starts with the series name."""
+    stem = group['name']
+    return new_follow(stem, f"u/{group['author']}", 're:^\\s*' + _LEAD_TAGS + re.escape(stem) + r'(?![A-Za-z0-9])', group['author'], author_note=author_note)
+
+
+def preview_series(source, follow, pages=FIRST_RUN_PAGES, cancelled=lambda: False, progress=lambda msg: None):
+    """Everything the author has under this series name, so the whole series can be judged before following it.
+    Returns {'count', 'first', 'last', 'titles'} (titles: first and last few)."""
+    posts, after = {}, None
+    for number in range(pages):
+        if cancelled():
+            raise Cancelled()
+        progress(f'Looking through {follow["source"]["user"]}\'s posts, page {number + 1}')
+        found, after = source.page(follow['source'], after)
+        for e in found:
+            if matches(e, follow):
+                posts[e['id']] = e
+        if not found or not after:
+            break
+    ordered = sorted(posts.values(), key=lambda p: p['created'])
+    day = lambda p: datetime.fromtimestamp(p['created'], timezone.utc).date().isoformat()
+    return {'count': len(ordered), 'first': day(ordered[0]) if ordered else '', 'last': day(ordered[-1]) if ordered else '',
+            'titles': [p['title'] for p in ordered[:3]] + (['\u2026'] if len(ordered) > 6 else []) + [p['title'] for p in ordered[-3:]] if len(ordered) > 3 else [p['title'] for p in ordered]}
 
 
 def make_source(mode, client_id='', client_secret='', username='', cancelled=lambda: False, refresh_token=''):

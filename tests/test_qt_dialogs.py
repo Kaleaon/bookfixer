@@ -593,6 +593,62 @@ class RedditPluginTests(QtCase):
         action.check_now(list(self.config.prefs['follows']))
         self.assertEqual(len(db.books), 3)
 
+    def test_find_stories_groups_series_and_follows_the_whole_thing(self):
+        core = self.core
+
+        class FeedFake:
+            urls = []
+
+            def __init__(self, min_interval=0, cancelled=lambda: False, **kwargs):
+                pass
+
+            def get(self, url, headers=None, **kwargs):
+                FeedFake.urls.append(url)
+                return feed(entry('s3', 'Saga of Ash 3', '<p>three</p>', author='/u/Writer', stamp='2026-10-03T10:00:00+00:00'),
+                            entry('s1', 'Saga of Ash 1', '<p>one</p>', author='/u/Writer', stamp='2026-10-01T10:00:00+00:00'),
+                            entry('s2', '[OC] Saga of Ash, Part 2', '<p>two</p>', author='/u/Writer', stamp='2026-10-02T10:00:00+00:00'),
+                            entry('x1', 'A lone tale', '<p>alone</p>', author='/u/Other', stamp='2026-10-04T10:00:00+00:00'))
+        core.Fetcher = FeedFake
+        action = self.make_action()
+        action_module = importlib.import_module(self.package + '.action')
+
+        class AutoFollow(self.ui.FollowDialog):
+            def exec(self):
+                self.try_accept()
+                return self.result()
+        self.ui.FollowDialog = AutoFollow
+        dialog = self.ui.DiscoverDialog(None, action)
+        dialog.words.setText('saga')
+        dialog.search()
+        self.assertTrue(any('/r/HFY/search.rss' in u and 'q=saga' in u for u in FeedFake.urls))
+        names = [dialog.table.item(r, 0).text() for r in range(dialog.table.rowCount())]
+        self.assertEqual(names, ['Saga of Ash', 'A lone tale  (single story)'], 'the series first, the lone story marked')
+        self.assertEqual((dialog.table.item(0, 1).text(), dialog.table.item(0, 2).text(), dialog.table.item(0, 3).text()), ('Writer', '3', '1\u20133'))
+        dialog.follow_selected()
+        self.assertIn('Select one series', dialog.message.text())
+        dialog.table.selectRow(0)
+        dialog.follow_selected()
+        chosen = dialog.chosen
+        self.assertEqual((chosen['name'], chosen['source']['user'], chosen['author_filter']), ('Saga of Ash', 'Writer', 'Writer'))
+        self.assertTrue(any('/user/Writer/submitted.rss' in u for u in FeedFake.urls), 'the author\'s own posts were read for every part')
+
+        # end to end from the menu: the series is added and collected as one book
+        class AutoDiscover(self.ui.DiscoverDialog):
+            def exec(self):
+                self.words.setText('saga')
+                self.search()
+                self.table.selectRow(0)
+                self.follow_selected()
+                return self.result()
+        action_module.DiscoverDialog = AutoDiscover
+        self.config.prefs['follows'] = []
+        action.discover()
+        self.assertEqual([f['name'] for f in self.config.prefs['follows']], ['Saga of Ash'])
+        books = list(action.gui.db.books.values())
+        self.assertEqual(len(books), 1)
+        z = zipfile.ZipFile(io.BytesIO(books[0]['formats']['EPUB']))
+        self.assertEqual(len([n for n in z.namelist() if n.startswith('OEBPS/s001_')]), 3, 'all three parts, whatever their title style')
+
     def test_manage_dialog_lists_and_removes_follows_and_their_cache(self):
         follow = self.core.new_follow('Series', 'u/writer', 'Chapter')
         self.config.prefs['follows'] = [follow]

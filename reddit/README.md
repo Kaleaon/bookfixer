@@ -40,6 +40,18 @@ Register the app at reddit.com/prefs/apps with the redirect uri exactly `http://
 
 Whether Reddit currently lets you create such an app without approval, and how it treats this login, is not something I could check; this flow is written to Reddit's documented OAuth2 and tested against a stand-in server, not the real service.
 
+## Finding stories and whole series (r/HFY and similar)
+
+**Reddit stories → Find stories…** (also a button in the followed-stories window) searches or browses a subreddit and groups what it finds into series:
+
+- Choose the subreddit (HFY by default), optional search words, and an order: best match for the words, top of all time / this year / this month, or newest. *Flair contains* narrows to a flair such as `OC-FirstOfSeries` (official API only).
+- Posts are grouped by **author and title name**, reading part numbers in the shapes HFY uses: `Name 14`, `Name, Part 14`, `Name - Chapter 14`, `Name (14)`, `Name #14`, `Name VIII` (capital Roman numerals), with `[OC]` or `[Universe]` tags in front ignored. Two different part numbers, or a *series* flair on two posts, make it a series; the rest are listed as single stories. The same name by two authors stays two series.
+- **Follow the whole series…** then reads the author's own posts back through their history (up to 3,000 posts at a time) and shows how many parts it found and from when to when, with the first and last titles. If you go on, the usual Add dialog opens filled in (the author, and a title filter that matches the name with any tags in front) so you can change it, and the series is collected as one growing book.
+
+Checked on the real r/HFY: the top-of-all-time list showed 121 parts of *The Nature of Predators* (SpacePaladin15), and following it found 284 (2022-04-11 to 2025-01-04, ending "2-99 [Final]"); *Salvage* (Rantarian, Jenkinsverse) showed 86 and following found 89, 2014 to 2020, from the first post to "Chapter 100" (11 numbers have no post under that name, probably titled differently or posted by someone else).
+
+What it cannot do: it knows a series only by its author and title, so parts retitled partway (as Out of Cruel Space was) need the *Title contains* box adjusted by hand; a series with tag-only titles such as `[Jenkinsverse] 5.` shows up as pieces; and parts posted by several authors are not joined. Search and browse use Reddit's search, which returns only the first pages (the dialog looks through three).
+
 ## Long series, and comments
 
 Tried against the real history of Out of Cruel Space (by u/KyleKKent) with the official API: the author's post list reaches back to Part 1 (2021-05-19) and held 1,802 chapter posts, collected in about 40 seconds. The series was renamed part-way, from "Out of Cruel Space, Part N" (Parts 1-999) to "OOCS, Into A Wider Galaxy, Part N" (Parts 1-800 so far), so the Quick start now follows both names (but not the separate side stories). Earlier versions only matched the old name inside the newest 1,000 posts, which is how a book could stop at a couple of hundred chapters. A first check now reads back up to 30 pages at a time and keeps going on the next check until it reaches the beginning; editing a follow's filters makes it read back again.
