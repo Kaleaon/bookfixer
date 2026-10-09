@@ -708,6 +708,17 @@ class RedditPluginTests(QtCase):
         action.discover()
         self.assertEqual(len(self.config.prefs['follows']), 2)
 
+    def test_followed_stories_list_shows_filters_in_words(self):
+        core = self.core
+        action = self.make_action()
+        self.config.prefs['follows'] = [core.series_follow({'name': 'The Nature of Predators', 'author': 'SpacePaladin15'}),
+                                        core.new_follow('Out of Cruel Space', 'u/KyleKKent', 'Out of Cruel Space', 'KyleKKent')]
+        dialog = self.ui.ManageDialog(None, action)
+        text = [dialog.table.item(r, 1).text() for r in range(dialog.table.rowCount())]
+        self.assertEqual(text, ['u/SpacePaladin15  title starts with \u201cThe Nature of Predators\u201d, by SpacePaladin15',
+                                'u/KyleKKent  title has \u201cOut of Cruel Space\u201d, by KyleKKent'])
+        self.assertFalse(any('re:' in t or '\\' in t or '(?' in t for t in text), 'no regular expression is shown to the user')
+
     def test_manage_dialog_lists_and_removes_follows_and_their_cache(self):
         follow = self.core.new_follow('Series', 'u/writer', 'Chapter')
         self.config.prefs['follows'] = [follow]

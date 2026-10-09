@@ -534,6 +534,24 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(core.parse_listing(listing)[0][0]['score'], 1234)
         self.assertEqual(core.group_series([post(1)])[0]['score'], 0)
 
+    def test_filters_are_described_in_words_not_as_regular_expressions(self):
+        # the stored title filters exactly as they appeared in the list of followed stories
+        old_form = 're:^\\s*' + core._LEAD_TAGS + 'The\\ Nature\\ of\\ Predators(?![A-Za-z0-9])'
+        follow = core.new_follow('The Nature of Predators', 'u/SpacePaladin15', old_form, 'SpacePaladin15')
+        self.assertEqual(core.describe_filters(follow), '  title starts with \u201cThe Nature of Predators\u201d, by SpacePaladin15')
+        made = core.series_follow({'name': "Humans don't Make Good Pets", 'author': 'guidosbestfriend'})
+        self.assertNotIn('\\ ', made['title_filter'], 'spaces are not escaped in the patterns we write')
+        self.assertEqual(core.describe_filters(made), '  title starts with \u201cHumans don\'t Make Good Pets\u201d, by guidosbestfriend')
+        self.assertTrue(core.matches({'title': '[OC] Humans don\'t Make Good Pets 12', 'author': 'guidosbestfriend', 'html': '<p>x</p>'}, made))
+        preset = core.PRESETS[0]
+        self.assertEqual(core.describe_filters(core.new_follow('x', preset['source'], preset['title_filter'], preset['author_filter'])),
+                         '  title starts with \u201c(Out of Cruel Space|OOCS)\u201d, by KyleKKent')
+        self.assertEqual(core.describe_filters(core.new_follow('x', 'u/KyleKKent', 'Out of Cruel Space', 'KyleKKent')), '  title has \u201cOut of Cruel Space\u201d, by KyleKKent')
+        self.assertEqual(core.describe_filters(core.new_follow('x', 'r/HFY')), '')
+        self.assertEqual(core.describe_filters(core.new_follow('x', 'r/stories', layout='each', flair_filter='FICTION')),
+                         '  flair \u201cFICTION\u201d, each post as its own book')
+        self.assertEqual(core.describe_filters(core.new_follow('x', 'r/HFY', 're:^\\s*Odd(Pattern)\\d+')), '  title starts with \u201cOdd(Pattern)\\d+\u201d'.replace('\\d+', 'd+'))
+
     def test_follow_for_a_series_matches_its_parts_and_not_other_stories(self):
         group = [g for g in core.group_series(self.posts()) if g['name'] == 'Salvage' and g['author'] == 'Alpha'][0]
         follow = core.series_follow(group)

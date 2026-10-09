@@ -95,6 +95,30 @@ def describe_source(src):
     return f"search “{src['query']}”" + (f" in r/{src['subreddit']}" if src['subreddit'] else '')
 
 
+def describe_filters(follow):
+    """The follow's filters in words for the list of followed stories (the stored title filter may be a regular expression that
+    this plugin wrote, which people should not have to read)."""
+    parts = []
+    title = follow.get('title_filter', '')
+    if title:
+        if title.lower().startswith('re:'):
+            body = title[3:]
+            starts = body.startswith('^\\s*')
+            for fragment in ('^\\s*', _LEAD_TAGS, '(?![A-Za-z0-9])', '\\b', '.*\\d'):
+                body = body.replace(fragment, '')
+            body = re.sub(r'\\(.)', r'\1', body)
+            parts.append(f"title {'starts with' if starts else 'matches'} \u201c{body}\u201d")
+        else:
+            parts.append(f'title has \u201c{title}\u201d')
+    if follow.get('author_filter'):
+        parts.append(f"by {follow['author_filter']}")
+    if follow.get('flair_filter'):
+        parts.append(f"flair \u201c{follow['flair_filter']}\u201d")
+    if follow.get('layout') == 'each':
+        parts.append('each post as its own book')
+    return '  ' + ', '.join(parts) if parts else ''
+
+
 # Ready-made follows for series the user asked for. Authors and title patterns were read from the series' own first post.
 PRESETS = [
     {'label': 'Out of Cruel Space (r/HFY, by KyleKKent)', 'name': 'Out of Cruel Space', 'source': 'u/KyleKKent',
@@ -467,7 +491,8 @@ def discover(source, src, flair='', pages=3, cancelled=lambda: False, progress=l
 def series_follow(group, author_note=False):
     """A follow for a discovered series: the author's posts whose title starts with the series name."""
     stem = group['name']
-    return new_follow(stem, f"u/{group['author']}", 're:^\\s*' + _LEAD_TAGS + re.escape(stem) + r'(?![A-Za-z0-9])', group['author'], author_note=author_note)
+    name = re.escape(stem).replace('\\ ', ' ')  # spaces need no escaping here, and the pattern is shown to people
+    return new_follow(stem, f"u/{group['author']}", 're:^\\s*' + _LEAD_TAGS + name + r'(?![A-Za-z0-9])', group['author'], author_note=author_note)
 
 
 def preview_series(source, follow, pages=FIRST_RUN_PAGES, cancelled=lambda: False, progress=lambda msg: None):
