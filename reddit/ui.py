@@ -56,6 +56,11 @@ class FollowDialog(QDialog):
         self.author_filter.setPlaceholderText('Only posts by this user (optional)')
         form.addRow('Posted by', self.author_filter)
         layout.addLayout(form)
+        self.author_note = QCheckBox("Also keep the author's own comment under each chapter (official API only)")
+        self.author_note.setToolTip('Authors often use their comment for notes, prefaces or links. Costs one extra request per chapter, '
+                                    'so a long series takes a while on the first pass; reader comments are not included.')
+        self.author_note.setChecked(bool(follow and follow.get('author_note')))
+        layout.addWidget(self.author_note)
         self.message = QLabel('')
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
@@ -101,8 +106,8 @@ class FollowDialog(QDialog):
     def result_follow(self):
         """A new follow, or the edited existing one (keeping its id and history)."""
         if self.follow is None:
-            return core.new_follow(self.name.text(), self.source.text(), self.title_filter.text(), self.author_filter.text())
-        updated = core.new_follow(self.name.text() or self.follow['name'], self.source.text(), self.title_filter.text(), self.author_filter.text())
+            return core.new_follow(self.name.text(), self.source.text(), self.title_filter.text(), self.author_filter.text(), self.author_note.isChecked())
+        updated = core.new_follow(self.name.text() or self.follow['name'], self.source.text(), self.title_filter.text(), self.author_filter.text(), self.author_note.isChecked())
         updated.update(id=self.follow['id'], last_checked=0.0, last_status='changed; will be checked again')
         return updated
 

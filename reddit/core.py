@@ -29,7 +29,9 @@ PUBLISHER = 'Reddit'
 MIN_CHECK_HOURS = 1.0
 MIN_FEED_INTERVAL = 7.0       # seconds between requests without credentials (Reddit has allowed roughly 10 a minute)
 MIN_API_INTERVAL = 2.0        # seconds between requests through the official API
-FIRST_RUN_PAGES = 10         # newest 1000 posts at most on the first check
+FIRST_RUN_PAGES = 30         # newest 3000 posts at most per backfill pass; a longer history is finished by the next check
+NOTE_BATCH = 300             # author comments fetched per check (one request each); the rest follow on the next checks
+NOTES_GAP_HOURS = 0.25       # how soon a check that still owes author comments may run again
 NAV_WORDS = r'(?:first|previous|prev|next|latest|last|index|wiki|series|home|start|final|chapter|part|start here|table of contents|toc)'
 
 
@@ -91,7 +93,8 @@ def describe_source(src):
 # Ready-made follows for series the user asked for. Authors and title patterns were read from the series' own first post.
 PRESETS = [
     {'label': 'Out of Cruel Space (r/HFY, by KyleKKent)', 'name': 'Out of Cruel Space', 'source': 'u/KyleKKent',
-     'title_filter': 'Out of Cruel Space', 'author_filter': 'KyleKKent'},
+     # the author renamed the series part-way: "Out of Cruel Space, Part N" became "OOCS, Into A Wider Galaxy, Part N"
+     'title_filter': 're:^\\s*(Out of Cruel Space|OOCS)\\b.*\\d', 'author_filter': 'KyleKKent'},
 ]
 
 
@@ -300,6 +303,27 @@ class ApiSource:
         return parse_listing(text)
 
 
+    def author_comment(self, entry):
+        """The post author's own top-level comment as cleaned HTML ('' if there is none). One request."""
+        if not self._token or time.monotonic() >= self._expires:
+            self._authorize()
+        post_id = entry['id'].split('_', 1)[-1]
+        text = self.fetcher.get(f"{self.base}/comments/{post_id}?limit=100&depth=1&sort=top&raw_json=1",
+                                headers={'Authorization': f'bearer {self._token}', 'User-Agent': self.user_agent})
+        return top_level_author_comment(text, entry.get('author', ''))
+
+
+def top_level_author_comment(json_text, author):
+    data = json.loads(json_text)
+    if not (isinstance(data, list) and len(data) > 1):
+        return ''
+    for child in data[1].get('data', {}).get('children', []):
+        d = child.get('data', {}) if child.get('kind') == 't1' else {}
+        if author and d.get('author', '').casefold() == author.casefold() and d.get('body_html'):
+            return main_html(d['body_html'])
+    return ''
+
+
 def make_source(mode, client_id='', client_secret='', username='', cancelled=lambda: False, refresh_token=''):
     """The reader for the chosen mode, paced so as to stay within Reddit's limits for that mode."""
     if mode == 'api':
@@ -334,11 +358,11 @@ def probe(source, src, follow=None, limit=25):
 
 # ---------------------------------------------------------------- follows, filters, and the chapter cache
 
-def new_follow(name, source_text, title_filter='', author_filter=''):
+def new_follow(name, source_text, title_filter='', author_filter='', author_note=False):
     src = parse_source(source_text)
     return {'id': uuid.uuid4().hex[:10], 'name': name.strip() or describe_source(src), 'source': src,
             'title_filter': title_filter.strip(), 'author_filter': author_filter.strip().lstrip('/').replace('u/', '', 1),
-            'last_checked': 0.0, 'last_status': ''}
+            'author_note': bool(author_note), 'last_checked': 0.0, 'last_status': ''}
 
 
 def matches(entry, follow):
@@ -399,7 +423,13 @@ def check_follow(source, follow, cache, max_pages=None, cancelled=lambda: False,
     The first check pages back through the feed; later checks read only until they reach posts seen before. A
     RateLimited error propagates after the cache has been saved with whatever was read."""
     src = follow['source']
-    first_run = not cache.posts and not cache.data['newest_created']
+    # a history is "complete" once a pass has read all the way back; until then each check keeps backfilling (older caches
+    # from before this was tracked count as incomplete, so they are topped up once)
+    signature = [follow.get('title_filter', ''), follow.get('author_filter', ''), source_text(src)]
+    if cache.data.get('signature') != signature:
+        cache.data['complete'] = False  # the filters changed, so older posts may now belong
+        cache.data['signature'] = signature
+    first_run = not cache.data.get('complete')
     max_pages = max_pages or (FIRST_RUN_PAGES if first_run else 3)
     known_newest, known_id = cache.data['newest_created'], cache.data['newest_id']
     new, changed, after, pages, newest = [], [], None, 0, (0.0, '')
@@ -426,13 +456,45 @@ def check_follow(source, follow, cache, max_pages=None, cancelled=lambda: False,
                 else:
                     continue
                 cache.posts[e['id']] = {k: e[k] for k in ('id', 'title', 'author', 'created', 'link', 'html')}
+                if old is not None and 'note' in old:
+                    cache.posts[e['id']]['note'] = old['note']
             if not entries or not after or reached_known:
+                if first_run and (not entries or not after):
+                    cache.data['complete'] = True
                 break
     finally:
         if newest[0]:
             cache.data['newest_created'], cache.data['newest_id'] = max(known_newest, newest[0]), newest[1] if newest[0] >= known_newest else known_id
         cache.save()
-    return {'new': new, 'changed': changed, 'pages': pages}
+    pending = fetch_notes(source, follow, cache, cancelled, progress)
+    return {'new': new, 'changed': changed, 'pages': pages, 'notes_pending': pending}
+
+
+def fetch_notes(source, follow, cache, cancelled=lambda: False, progress=lambda msg: None, batch=None):
+    """Fetch the author's own comment for cached chapters that lack one (only when the follow asks for it and the reader is
+    the API). Returns how many chapters still wait. A rate limit propagates after the cache is saved."""
+    if not follow.get('author_note') or not hasattr(source, 'author_comment'):
+        return 0
+    todo = [p for p in sorted(cache.posts.values(), key=lambda p: p['created'], reverse=True) if 'note' not in p]
+    done = 0
+    try:
+        for post in todo[:batch or NOTE_BATCH]:
+            if cancelled():
+                raise Cancelled()
+            progress(f"{follow['name']}: author comment {done + 1} of {min(len(todo), batch or NOTE_BATCH)}")
+            post['note'] = source.author_comment(post)
+            done += 1
+    finally:
+        if done:
+            cache.save()
+    return len(todo) - done
+
+
+def chapter_html(post):
+    body = post['html'] or '<p>(empty)</p>'
+    if post.get('note'):
+        body += '<hr/><p><em>Author\'s comment</em></p>' + post['note']
+    return body
 
 
 def build_story(follow, cache):
@@ -446,7 +508,7 @@ def build_story(follow, cache):
     src = follow['source']
     tags = ['Reddit'] + ([f"r/{src['subreddit']}"] if src.get('subreddit') else [])
     return {'id': 'reddit-' + follow['id'], 'url': posts[-1]['link'] or WWW, 'title': follow['name'], 'author': author,
-            'sections': [(p['title'], p['html'] or '<p>(empty)</p>') for p in posts], 'tags': tags, 'categories': [],
+            'sections': [(p['title'], chapter_html(p)) for p in posts], 'tags': tags, 'categories': [],
             'summary': f"{len(posts)} chapters collected from Reddit ({describe_source(src)}), {first} to {last}.",
             'publisher': PUBLISHER, 'pubdate': first}
 
@@ -462,6 +524,9 @@ def due(follow, hours, now=None):
     if not follow.get('last_checked'):
         return True  # never checked
     now = time.time() if now is None else now
+    if follow.get('notes_pending'):
+        hours = NOTES_GAP_HOURS  # still collecting author comments: carry on soon, a few pages of listing per check
+        return now - follow['last_checked'] >= hours * 3600
     return now - follow['last_checked'] >= max(hours, MIN_CHECK_HOURS) * 3600
 
 
@@ -478,7 +543,12 @@ def run_follows(source, follows, cache_dir, cancelled=lambda: False, progress=la
             outcome = check_follow(source, follow, cache, cancelled=cancelled, progress=progress)
             result['new'], result['changed'] = outcome['new'], outcome['changed']
             follow['last_checked'] = now()
+            follow['notes_pending'] = bool(outcome['notes_pending'])
             follow['last_status'] = (f"{len(outcome['new'])} new chapter(s)" if outcome['new'] else 'up to date')
+            if outcome['notes_pending']:
+                follow['last_status'] += f"; {outcome['notes_pending']} author comment(s) still to fetch"
+            elif follow.get('author_note') and not hasattr(source, 'author_comment'):
+                follow['last_status'] += '; author comments need the official API'
         except RateLimited as exc:
             result.update(rate_limited=True, retry_after=exc.retry_after, error=str(exc))
             follow['last_status'] = 'Reddit asked us to slow down; will try again later'

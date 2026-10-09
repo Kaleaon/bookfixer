@@ -494,12 +494,17 @@ class RedditPluginTests(QtCase):
         self.assertEqual(dialog.preset.count(), 1 + len(self.core.PRESETS))
         dialog.preset.setCurrentIndex(1)
         self.assertEqual((dialog.name.text(), dialog.source.text(), dialog.title_filter.text(), dialog.author_filter.text()),
-                         ('Out of Cruel Space', 'u/KyleKKent', 'Out of Cruel Space', 'KyleKKent'))
+                         ('Out of Cruel Space', 'u/KyleKKent', self.core.PRESETS[0]['title_filter'], 'KyleKKent'))
         self.assertIn('Will follow u/KyleKKent', dialog.message.text())
         dialog.try_accept()
         self.assertEqual(dialog.result(), 1)
         follow = dialog.result_follow()
         self.assertEqual((follow['name'], follow['source']['user'], follow['author_filter']), ('Out of Cruel Space', 'KyleKKent', 'KyleKKent'))
+        self.assertFalse(follow['author_note'], 'author comments are opt-in')
+        self.assertTrue(self.core.matches({'title': 'OOCS, Into A Wider Galaxy, Part 800', 'author': 'KyleKKent', 'html': '<p>x</p>'}, follow),
+                        'the preset keeps following after the series was renamed')
+        dialog.author_note.setChecked(True)
+        self.assertTrue(dialog.result_follow()['author_note'])
         edit = self.ui.FollowDialog(None, follow)
         self.assertFalse(hasattr(edit, 'preset'), 'editing an existing follow offers no presets')
 

@@ -40,6 +40,14 @@ Register the app at reddit.com/prefs/apps with the redirect uri exactly `http://
 
 Whether Reddit currently lets you create such an app without approval, and how it treats this login, is not something I could check; this flow is written to Reddit's documented OAuth2 and tested against a stand-in server, not the real service.
 
+## Long series, and comments
+
+Tried against the real history of Out of Cruel Space (by u/KyleKKent) with the official API: the author's post list reaches back to Part 1 (2021-05-19) and held 1,802 chapter posts, collected in about 40 seconds. The series was renamed part-way, from "Out of Cruel Space, Part N" (Parts 1-999) to "OOCS, Into A Wider Galaxy, Part N" (Parts 1-800 so far), so the Quick start now follows both names (but not the separate side stories). Earlier versions only matched the old name inside the newest 1,000 posts, which is how a book could stop at a couple of hundred chapters. A first check now reads back up to 30 pages at a time and keeps going on the next check until it reaches the beginning; editing a follow's filters makes it read back again.
+
+If you counted more than about 1,800 chapters, I could not find the difference: the listing ends at 1,802 matching posts, with a few numbers skipped (for example Part 760 of the first run). Posts Reddit does not list, or counting side stories, could explain it; I do not know.
+
+**Comments.** The author puts one top-level comment under each chapter: a preface on Part 1, later mostly Patreon and book links, a blurb for other stories, "most relevant chapters" links and fan links, and sometimes a real note (a schedule change, for example). Reader comments are discussion and are not included. Tick *Also keep the author's own comment* in the Add/Edit dialog to append it under each chapter as "Author's comment". It needs the official API and costs one request per chapter, so a long series is filled in batches of 300 chapters per check (about ten minutes each, newest first), with the next batch due again within 15 minutes. Other comments mention chapters only by link (a bot lists earlier parts); I found no separate chapter names in them.
+
 ## Two ways to read Reddit, and what is known about each
 
 | | Public feeds (default) | Official API (your own credentials) |

@@ -187,6 +187,110 @@ def post(n, title=None, html=None, author='Writer'):
             'link': f'https://www.reddit.com/r/HFY/comments/{n:03d}/x/', 'html': html if html is not None else f'<p>Chapter {n} text.</p>', 'subreddit': 'HFY'}
 
 
+class LongSeriesTests(unittest.TestCase):
+    """Found by running the plugin on the real, ~1800-post Out of Cruel Space history."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        preset = core.PRESETS[0]
+        self.follow = core.new_follow(preset['name'], preset['source'], preset['title_filter'], preset['author_filter'])
+
+    def test_preset_follows_the_series_across_its_rename(self):
+        for title in ('Out of Cruel Space, Part 1', 'Out of Cruel Space, part 12', 'OOCS, Into A Wider Galaxy, Part 800',
+                      'OOCS, Into The Wider Galaxy, Part 3', 'OOCS, Into A Wider Galaxy 77'):
+            self.assertTrue(core.matches(post(1, title=title, author='KyleKKent'), self.follow), title)
+        for title in ('Out of Cruel Space Side Story: Of Dog, Volpir, and Man', 'Something else, Part 4'):
+            self.assertFalse(core.matches(post(1, title=title, author='KyleKKent'), self.follow), title)
+        self.assertFalse(core.matches(post(1, title='OOCS, Into A Wider Galaxy, Part 9', author='Fan'), self.follow))
+
+    def test_first_check_reads_a_history_longer_than_ten_pages(self):
+        posts = [post(n, author='KyleKKent') for n in range(1500, 0, -1)]
+        source = FakeSource(posts, per_page=100)
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        result = core.check_follow(source, self.follow, cache)
+        self.assertEqual((len(cache.posts), result['pages']), (1500, 15))
+        self.assertTrue(cache.data['complete'])
+
+    def test_unfinished_backfill_continues_and_old_caches_are_topped_up(self):
+        posts = [post(n, author='KyleKKent') for n in range(300, 0, -1)]
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        core.check_follow(FakeSource(posts, per_page=50), self.follow, cache, max_pages=2)
+        self.assertEqual(len(cache.posts), 100)
+        self.assertFalse(cache.data.get('complete'), 'stopped early, so the history is not complete')
+        core.check_follow(FakeSource(posts, per_page=50), self.follow, cache)
+        self.assertEqual(len(cache.posts), 300)
+        # a later check stops once it reaches known posts
+        source = FakeSource([post(301, author='KyleKKent')] + posts, per_page=50)
+        result = core.check_follow(source, self.follow, cache)
+        self.assertEqual((result['new'], result['pages']), (['Out of Cruel Space (Chapter 301)'], 1))
+        # a cache written before completeness was tracked is read back through once
+        del cache.data['complete'], cache.data['signature']
+        again = core.check_follow(FakeSource([post(301, author='KyleKKent')] + posts, per_page=50), self.follow, cache)
+        self.assertTrue(cache.data['complete'] and again['pages'] == 7)
+
+    def test_changing_the_filter_rescans_the_history(self):
+        posts = [post(n, author='KyleKKent') for n in range(60, 0, -1)]
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        core.check_follow(FakeSource(posts, per_page=20), self.follow, cache)
+        self.follow['title_filter'] = ''
+        result = core.check_follow(FakeSource(posts, per_page=20), self.follow, cache)
+        self.assertEqual(result['pages'], 3, 'read all the way back again, not just to the newest known post')
+
+
+class AuthorNoteTests(unittest.TestCase):
+    COMMENTS = json.dumps([{'data': {'children': []}}, {'data': {'children': [
+        {'kind': 't1', 'data': {'author': 'Reader', 'body_html': '<div class="md"><p>Great!</p></div>'}},
+        {'kind': 't1', 'data': {'author': 'KyleKKent', 'body_html': '<div class="md"><p>Thanks for reading. <a href="https://x.example/">Wiki</a></p></div>'}},
+        {'kind': 'more', 'data': {}}]}}])
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.follow = core.new_follow('Series', 'u/KyleKKent', '', 'KyleKKent', author_note=True)
+
+    def test_picks_the_authors_own_top_level_comment(self):
+        self.assertIn('Thanks for reading', core.top_level_author_comment(self.COMMENTS, 'kylekkent'))
+        self.assertEqual(core.top_level_author_comment(self.COMMENTS, 'Nobody'), '')
+        self.assertEqual(core.top_level_author_comment('{}', 'x'), '')
+
+    def test_notes_are_fetched_in_batches_kept_and_added_to_the_book(self):
+        class Noted(FakeSource):
+            mode = 'api'
+            fetched = 0
+
+            def author_comment(self, entry):
+                Noted.fetched += 1
+                return '' if entry['id'].endswith('002') else f"<p>Note for {entry['id']}</p>"
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        source = Noted([post(n, author='KyleKKent') for n in range(5, 0, -1)], per_page=10)
+        core.check_follow(source, self.follow, cache)
+        self.assertEqual(Noted.fetched, 5)
+        left = core.fetch_notes(source, self.follow, cache)
+        self.assertEqual((left, Noted.fetched), (0, 5), 'chapters with a recorded note (even an empty one) are not asked again')
+        story = core.build_story(self.follow, cache)
+        self.assertIn("Author's comment", story['sections'][0][1])
+        self.assertIn('Note for t3_001', story['sections'][0][1])
+        self.assertNotIn("Author's comment", story['sections'][1][1], 'no comment, nothing added')
+        self.assertEqual(core.fetch_notes(source, self.follow, cache, batch=1), 0)
+        cache.posts['t3_004'].pop('note')
+        cache.posts['t3_003'].pop('note')
+        self.assertEqual(core.fetch_notes(source, self.follow, cache, batch=1), 1, 'newest first, and a batch leaves the rest')
+
+    def test_feed_reader_and_unwanting_follows_fetch_nothing(self):
+        cache = core.ChapterCache(self.tmp.name, self.follow['id'])
+        core.check_follow(FakeSource([post(1, author='KyleKKent')]), self.follow, cache)
+        self.assertNotIn('note', cache.posts['t3_001'])
+        plain = core.new_follow('S', 'u/writer')
+        self.assertEqual(core.fetch_notes(type('A', (), {'author_comment': lambda s, e: 'x'})(), plain, cache), 0)
+
+    def test_follows_owing_comments_are_due_again_soon(self):
+        follow = dict(self.follow, last_checked=1000.0, notes_pending=True)
+        self.assertFalse(core.due(follow, 6, now=1000.0 + 600))
+        self.assertTrue(core.due(follow, 6, now=1000.0 + 1000))
+        self.assertFalse(core.due(dict(follow, notes_pending=False), 6, now=1000.0 + 1000))
+
+
 class ProbeTests(unittest.TestCase):
     SRC = core.parse_source('r/HFY')
 
