@@ -451,6 +451,8 @@ class FakeReddit(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         type(self).log.append(('get', dict(self.headers), self.path))
+        if type(self).mode == 'scope':
+            self.send_response(403); self.send_header('WWW-Authenticate', 'Bearer realm="reddit", error="insufficient_scope"'); self.end_headers(); return
         if type(self).mode == 'limited':
             self.send_response(429); self.send_header('Retry-After', '45'); self.end_headers(); return
         self._send(200, {'kind': 'Listing', 'data': {'after': None, 'children': [{'kind': 't3', 'data': {
@@ -506,6 +508,14 @@ class ApiSourceTests(unittest.TestCase):
             self.api().page(core.parse_source('r/HFY'))
         with self.assertRaises(core.SourceError):
             self.api(client='').page(core.parse_source('r/HFY'))
+
+    def test_missing_scope_on_a_saved_login_says_to_log_in_again(self):
+        FakeReddit.mode = 'scope'
+        api = core.ApiSource(core.Fetcher(min_interval=0), 'abc123', '', 'Reader', token_url=self.base + '/token', base=self.base, refresh_token='r1')
+        with self.assertRaisesRegex(core.SourceError, 'Log out'):
+            api.page(core.parse_source('u/name'))
+        with self.assertRaisesRegex(IOError, 'insufficient_scope'):  # without a saved login the reason is still shown
+            self.api().page(core.parse_source('u/name'))
 
     def test_rate_limit_from_the_api(self):
         FakeReddit.mode = 'limited'
