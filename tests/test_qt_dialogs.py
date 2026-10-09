@@ -963,6 +963,7 @@ class GeminiDialogTests(QtCase):
         answers = [
             {'id': 1, 'title': 'Dune Messiah', 'authors': ['Frank Herbert'], 'series': 'Dune', 'series_index': 2, 'tags': ['Science Fiction'],
              'language': 'eng', 'confidence': 'high', 'reason': 'junk in title'},
+            {'id': 2, 'confidence': 'high', 'reason': 'already fine'},
             {'id': 3, 'title': 'Totally Different Novel', 'confidence': 'high', 'reason': 'guess'},
         ]
         canned = json.dumps({'candidates': [{'content': {'parts': [{'text': json.dumps(answers)}]}}]}).encode()
@@ -985,6 +986,10 @@ class GeminiDialogTests(QtCase):
                 return next(b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == text)
             tree = dialog.findChild(QtWidgets.QTreeWidget)
             button('Check books').click()
+            bar = dialog.findChild(QtWidgets.QProgressBar)
+            seen['log'] = dialog.findChild(QtWidgets.QPlainTextEdit).toPlainText()
+            seen['bar'] = (bar.value(), bar.maximum())
+            seen['cancel_enabled_after'] = button('Cancel').isEnabled()
             seen['rows'] = [(tree.topLevelItem(i).text(0), tree.topLevelItem(i).checkState(0), tree.topLevelItem(i).childCount())
                             for i in range(tree.topLevelItemCount())]
             self.assertTrue(button('Apply ticked changes').isEnabled())
@@ -1002,6 +1007,17 @@ class GeminiDialogTests(QtCase):
             QtWidgets.QDialog.exec = original_exec
 
 
+        log = seen['log']
+        self.assertIn('Reading 3 book(s) from your library', log)
+        self.assertIn('read 1/3', log)
+        self.assertIn('“dune messiah [epub]” | by Herbert, Frank | tags: Sci-Fi | files: 1.epub', log, 'the data being read is shown')
+        self.assertIn('Sending 3 book(s) to Gemini', log)
+        self.assertIn('→ Sending 3 book(s) to Gemini:', log)
+        self.assertIn('✔ “dune messiah [epub]” [high]: title “dune messiah [epub]” → “Dune Messiah”', log, 'each answer is shown')
+        self.assertIn('– “Fine Book”: no change needed', log)
+        self.assertIn('Done: 2 of 3 book(s) have suggested changes', log)
+        self.assertEqual(seen['bar'], (3, 3), 'the bar ends full')
+        self.assertFalse(seen['cancel_enabled_after'], 'Cancel is only live while work is running')
         T = QtCore.Qt.CheckState
         rows = {r[0]: r[1] for r in seen['rows']}  # books are asked about grouped by author, so the order is not the library's
         self.assertEqual(set(rows), {'dune messiah [epub]', 'Cooking Today'})
@@ -1023,6 +1039,49 @@ class GeminiDialogTests(QtCase):
         self.assertEqual(restored['tags'], ('Sci-Fi',))
         self.assertEqual(restored['languages'], ())
         self.assertEqual(dict(action_mod.prefs['undo']), {}, 'a clean undo clears the saved run')
+
+    def test_cancel_during_a_run_stops_further_requests_and_says_so(self):
+        import json
+        package = self.load('gemini_library_fixer')
+        sys.modules['calibre.gui2.actions'].InterfaceAction = object
+        engine = importlib.import_module(package + '.engine')
+        action_mod = importlib.import_module(package + '.action')
+        calls = []
+
+        def slow_post(url, headers, body, timeout):
+            calls.append(1)
+            time.sleep(0.4)
+            return json.dumps({'candidates': [{'content': {'parts': [{'text': '[]'}]}}]}).encode()
+
+        engine._post = slow_post
+        gui = QtWidgets.QWidget()
+        gui.current_db = MagicMock(new_api=GeminiDb())
+        gui.library_view = MagicMock()
+        gui.library_view.get_selected_ids.return_value = [1, 2, 3]
+        gui.tags_view = MagicMock()
+        action = action_mod.GeminiFixerAction()
+        action.gui = gui
+        action_mod.prefs['api_key'] = 'k'
+        action_mod.prefs['batch_size'] = 1
+        action_mod.prefs['min_interval'] = 0
+        seen = {}
+
+        def drive(dialog):
+            cancel = next(b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == 'Cancel')
+            QtCore.QTimer.singleShot(150, cancel.click)  # pressed while the first request is still in flight
+            next(b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == 'Check books').click()
+            seen['log'] = dialog.findChild(QtWidgets.QPlainTextEdit).toPlainText()
+            seen['check_enabled'] = next(b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == 'Check books').isEnabled()
+
+        original_exec = QtWidgets.QDialog.exec
+        QtWidgets.QDialog.exec = drive
+        try:
+            action.show_dialog()
+        finally:
+            QtWidgets.QDialog.exec = original_exec
+        self.assertEqual(len(calls), 1, 'the second and third requests never start')
+        self.assertIn('Cancel pressed', seen['log'])
+        self.assertTrue(seen['check_enabled'], 'the window is usable again afterwards')
 
     def test_api_key_is_saved_when_the_window_closes_without_checking(self):
         package = self.load('gemini_library_fixer')
