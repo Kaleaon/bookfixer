@@ -25,6 +25,9 @@ def metadata_for(group, title, identifier, publisher):
         if story.get('summary'):
             mi.comments = f"<p>{escape(story['summary'])}</p>"
         mi.set_identifier(identifier, story['id'])
+        if story.get('series'):
+            mi.series = story['series']
+            mi.series_index = story.get('series_index') or 1.0
         if story.get('pubdate'):
             try:
                 from calibre.utils.date import parse_date

@@ -200,3 +200,144 @@ class DownloadSelectionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ContentLinkTests(unittest.TestCase):
+    def setUp(self):
+        self.stories = stories(('Farmer in My Bed', 'gay/beginnings/farmer-in-my-bed'), ('Store Inventory', 'gay/encounters/store-inventory'),
+                               ('Car Repair', 'gay/adult-friends/car-repair'), ('Unrelated Tale', 'gay/college/unrelated'),
+                               ('The Haunted House', 'gay/sf-fantasy/haunted'))
+
+    def links(self, path, text):
+        return core.content_links({path: text}, self.stories)
+
+    def test_continued_from_a_sibling_title_is_a_link(self):
+        links = self.links('gay/encounters/store-inventory', 'Store Inventory\n\nContinued from farmer in my bed\n\nThis is part fictional.')
+        self.assertEqual([(l['later'], l['earlier'], l['relation']) for l in links],
+                         [('gay/encounters/store-inventory', 'gay/beginnings/farmer-in-my-bed', 'continued from')])
+        self.assertIn('farmer in my bed', links[0]['quote'].lower())
+        self.assertFalse(links[0]['quote'].startswith('ry '), 'quotes must not start mid-word')
+
+    def test_other_wordings_and_direction(self):
+        sequel = self.links('gay/encounters/store-inventory', 'This is the sequel to "Farmer in My Bed".')
+        self.assertEqual((sequel[0]['later'], sequel[0]['earlier']), ('gay/encounters/store-inventory', 'gay/beginnings/farmer-in-my-bed'))
+        prequel = self.links('gay/encounters/store-inventory', 'A prequel to Farmer in My Bed, written later.')
+        self.assertEqual((prequel[0]['later'], prequel[0]['earlier']), ('gay/beginnings/farmer-in-my-bed', 'gay/encounters/store-inventory'))
+        self.assertEqual(self.links('gay/encounters/store-inventory', 'Part 2 of Farmer in My Bed')[0]['relation'], 'part of')
+        self.assertEqual(self.links('gay/encounters/store-inventory', 'Previous story: Farmer in My Bed')[0]['relation'], 'previous story')
+
+    def test_wording_without_a_sibling_title_is_ignored(self):
+        for text in ('which continues on to this day, but to a lesser extent', 'This story is a continuation of a scene in a British film called If',
+                     'sequel to Something Else Entirely', 'To be continued.....', 'Continued from my last message'):
+            self.assertEqual(self.links('gay/encounters/store-inventory', text), [], text)
+
+    def test_a_story_never_links_to_itself_and_unknown_paths_are_skipped(self):
+        self.assertEqual(self.links('gay/encounters/store-inventory', 'a sequel to Store Inventory'), [])
+        self.assertEqual(core.content_links({'gay/other/not-this-authors': 'sequel to Car Repair'}, self.stories), [])
+
+    def test_html_in_samples_does_not_hide_the_phrase(self):
+        links = self.links('gay/encounters/store-inventory', '<P><B>Continued from</B> <I>Farmer in My Bed</I></P>')
+        self.assertEqual(len(links), 1)
+
+    def test_story_date(self):
+        self.assertEqual(core.story_date('Date: Sat, 4 Apr 2026 15:42:12 +0000\nFrom: x\n'), '2026-04-04')
+        self.assertEqual(core.story_date('no header here'), '')
+
+    def test_content_links_join_a_title_set_and_a_cross_folder_story(self):
+        stories_ = stories(('Texas Tails', 'gay/a/texas-tails'), ('Texas Tails: Jeremiah', 'gay/b/jeremiah'),
+                           ('Standalone Thing', 'gay/c/standalone'), ('Loner', 'gay/d/loner'))
+        texts = {'gay/c/standalone': 'Date: Mon, 5 Jan 2026 10:00:00 +0000\n\nContinued from Texas Tails: Jeremiah\n'}
+        series, rest = core.suggest_series_with_contents(stories_, texts)
+        self.assertEqual(len(series), 1)
+        entry = series[0]
+        self.assertEqual(entry['name'], 'Texas Tails')
+        self.assertEqual([s['title'] for s in entry['stories']][-1], 'Standalone Thing', 'the continuation comes after what it continues')
+        self.assertEqual({s['title'] for s in entry['stories']}, {'Texas Tails', 'Texas Tails: Jeremiah', 'Standalone Thing'})
+        self.assertIn('Series: Episode', entry['reason'])
+        self.assertIn('refer to each other', entry['reason'])
+        self.assertIn('Standalone Thing says', entry['evidence'][0])
+        self.assertEqual([s['title'] for s in rest], ['Loner'])
+
+    def test_chain_ordering_beats_alphabetical(self):
+        s = stories(('Aardvark Nights', 'gay/a/c'), ('Beta Story', 'gay/a/b'), ('Zeta Story', 'gay/a/a'))
+        texts = {'gay/a/c': 'sequel to Beta Story', 'gay/a/b': 'sequel to Zeta Story'}
+        series, _ = core.suggest_series_with_contents(s, texts)
+        self.assertEqual([x['title'] for x in series[0]['stories']], ['Zeta Story', 'Beta Story', 'Aardvark Nights'])
+        self.assertEqual(series[0]['name'], 'Zeta Story', 'a set found only from text is named after its first story')
+
+    def test_no_text_means_the_same_as_titles_alone(self):
+        s = stories(('Texas Tails', 'gay/a/tt'), ('Texas Tails: Jeremiah', 'gay/b/j'), ('Loner', 'gay/d/loner'))
+        with_text, rest_a = core.suggest_series_with_contents(s, {})
+        alone, rest_b = core.suggest_series(s)
+        self.assertEqual([[x['title'] for x in e['stories']] for e in with_text], [[x['title'] for x in e['stories']] for e in alone])
+        self.assertEqual(rest_a, rest_b)
+
+
+class RangeScanTests(unittest.TestCase):
+    class RangeFetcher(FakeFetcher):
+        def __init__(self, pages, ranges):
+            super().__init__(pages)
+            self.ranges, self.range_calls = ranges, []
+
+        def get_range(self, url, length=3000, tail=False):
+            self.range_calls.append((url.replace(core.SITE, ''), length, tail))
+            if url not in self.ranges:
+                raise IOError('missing ' + url)
+            return self.ranges[url]
+
+    def test_single_file_and_folder_samples(self):
+        listing = ('<table><tr><td>3K</td><td>Oct 3 1999</td><td><a href="tt-1">tt-1</a></td></tr>'
+                   '<tr><td>3K</td><td>Oct 4 1999</td><td><a href="tt-2">tt-2</a></td></tr></table>')
+        f = self.RangeFetcher({core.SITE + 'gay/a/tt/': listing},
+                              {core.SITE + 'gay/a/tt/tt-1': 'FIRST-HEAD', core.SITE + 'gay/a/tt/tt-2': 'LAST-TAIL',
+                               core.SITE + 'gay/b/one': 'ONE'})
+        folder = core.sample_text(f, {'title': 'TT', 'path': 'gay/a/tt', 'dir': True})
+        self.assertIn('FIRST-HEAD', folder)
+        self.assertIn('LAST-TAIL', folder)
+        self.assertEqual([(c[0], c[2]) for c in f.range_calls], [('gay/a/tt/tt-1', False), ('gay/a/tt/tt-2', True)],
+                         'head of the first chapter and tail of the last')
+        self.assertIn('ONE', core.sample_text(f, {'title': 'One', 'path': 'gay/b/one', 'dir': False}))
+
+    def test_scan_skips_what_is_known_survives_errors_and_keeps_progress_on_cancel(self):
+        f = self.RangeFetcher({}, {core.SITE + 'gay/b/one': 'ONE', core.SITE + 'gay/b/two': 'TWO'})
+        items = stories(('One', 'gay/b/one'), ('Two', 'gay/b/two'), ('Broken', 'gay/b/broken'))
+        texts = {'gay/b/one': 'already read'}
+        core.scan_texts(f, items, texts)
+        self.assertEqual(texts['gay/b/one'], 'already read', 'a sampled story is not fetched again')
+        self.assertIn('TWO', texts['gay/b/two'])
+        self.assertEqual(texts['gay/b/broken'], '', 'an unreadable story is remembered so it is not retried')
+
+        class Cancelling(self.RangeFetcher):
+            def get_range(self, url, length=3000, tail=False):
+                if url.endswith('/two'):
+                    raise core.Cancelled()
+                return super().get_range(url, length, tail)
+        kept = {}
+        with self.assertRaises(core.Cancelled):
+            core.scan_texts(Cancelling({}, {core.SITE + 'gay/b/one': 'ONE'}), stories(('One', 'gay/b/one'), ('Two', 'gay/b/two')), kept)
+        self.assertIn('gay/b/one', kept)
+
+
+class SeriesModeTests(unittest.TestCase):
+    def setUp(self):
+        self.a = {'title': 'Part A', 'path': 'gay/a/part-a', 'dir': False}
+        self.b = {'title': 'Part B', 'path': 'gay/b/part-b', 'dir': False}
+
+    def test_series_mode_builds_one_item_with_a_series_name(self):
+        sel = core.build_selection([('My Series', [self.a, self.b])], [], combine_series='series')
+        self.assertEqual(len(sel), 1)
+        self.assertEqual((sel[0]['title'], sel[0]['series'], len(sel[0]['addresses'])), (None, 'My Series', 2))
+
+    def test_separate_mode_and_single_member_sets(self):
+        self.assertEqual([i['title'] for i in core.build_selection([('S', [self.a, self.b])], [], combine_series=False)], [None, None])
+        sel = core.build_selection([('S', [self.a])], [], combine_series='series')
+        self.assertEqual(sel, [{'title': None, 'addresses': [core.story_address(self.a)]}], 'one story is not a series')
+
+    def test_downloaded_books_are_numbered_in_reading_order(self):
+        pages = {core.SITE + 'gay/a/part-a': CHAPTER.format(subject='Part A'), core.SITE + 'gay/b/part-b': CHAPTER.format(subject='Part B')}
+        sel = core.build_selection([('My Series', [self.a, self.b])], [], combine_series='series')
+        groups, _, _ = core.download_selection(FakeFetcher(pages), sel)
+        self.assertEqual(len(groups), 1)
+        self.assertIsNone(groups[0]['title'], 'not combined into one book')
+        self.assertEqual([(s['title'], s['series'], s['series_index']) for s in groups[0]['stories']],
+                         [('Part A', 'My Series', 1.0), ('Part B', 'My Series', 2.0)])

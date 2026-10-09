@@ -244,12 +244,37 @@ AUTHORS_PAGE = (_panel('writer', 'Writer One',
 
 
 class AuthorsFakeFetcher(FakeFetcher):
+    ranges = {
+        'gay/college/texas-tails/texas-tails-1': 'Date: Mon, 5 Jan 2026 10:00:00 +0000\n\nTexas Tails chapter one',
+        'gay/college/texas-tails/texas-tails-2': 'the end of Texas Tails',
+        'gay/highschool/jeremiah': 'Subject: Texas Tails: Jeremiah\n\nJeremiah text',
+        'gay/camping/standalone': 'Subject: Standalone\n\nContinued from Texas Tails\n\nmore text',
+    }
+
     def get(self, url):
         if url.endswith('authors.html'):
             return AUTHORS_PAGE
         if url.endswith('prolific.html'):
             return ''
+        if url.endswith('gay/college/texas-tails/'):
+            return ('<table><tr><td>3K</td><td>Oct 3 1999</td><td><a href="texas-tails-1">texas-tails-1</a></td></tr>'
+                    '<tr><td>3K</td><td>Oct 4 1999</td><td><a href="texas-tails-2">texas-tails-2</a></td></tr></table>')
         raise IOError('unexpected url ' + url)
+
+    def get_range(self, url, length=3000, tail=False):
+        key = url.split('/nifty/', 1)[1]
+        if key not in self.ranges:
+            raise IOError('unexpected range url ' + url)
+        return self.ranges[key]
+
+
+class YesBox:
+    """Stands in for QMessageBox so the confirmation answers Yes without a modal dialog."""
+    StandardButton = QtWidgets.QMessageBox.StandardButton if HAVE_QT else None
+
+    @staticmethod
+    def question(*args, **kwargs):
+        return QtWidgets.QMessageBox.StandardButton.Yes
 
 
 @unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')
@@ -307,12 +332,44 @@ class NiftyAuthorDialogTests(QtCase):
         dialog.author_list.setCurrentRow(0)
         dialog.check_all(True)
         self.assertEqual([i['title'] for i in dialog.selection()], ['Texas Tails', None])
-        dialog.combine_series.setChecked(False)
+        dialog.how.setCurrentIndex(2)  # separate books
         self.assertEqual([i['title'] for i in dialog.selection()], [None, None, None])
+        dialog.how.setCurrentIndex(1)  # separate books grouped as a Calibre series
+        series_items = dialog.selection()
+        self.assertEqual([(i['title'], i.get('series')) for i in series_items[:1]], [(None, 'Texas Tails')])
+        dialog.how.setCurrentIndex(0)
         dialog.combine_all.setChecked(True)
         dialog.combine_title.setText('Everything by Writer')
         selection = dialog.selection()
         self.assertEqual((len(selection), selection[0]['title'], len(selection[0]['addresses'])), (1, 'Everything by Writer', 3))
+
+    def test_scanning_contents_finds_a_set_the_titles_missed_and_keeps_ticks(self):
+        dialog, core = self.make()
+        ui = sys.modules[type(dialog).__module__]
+        ui.QMessageBox = YesBox
+        dialog.filter.setText('writer')
+        dialog.author_list.setCurrentRow(0)
+        names = lambda: [(dialog.tree.topLevelItem(i).text(0), dialog.tree.topLevelItem(i).childCount()) for i in range(dialog.tree.topLevelItemCount())]
+        before = names()
+        self.assertEqual(before[0][1], 2, 'titles alone: Texas Tails and Texas Tails: Jeremiah')
+        other = dialog.tree.topLevelItem(1)
+        other.child(0).setCheckState(0, QtCore.Qt.CheckState.Checked)  # tick "Standalone" before scanning
+
+        dialog.scan_contents()
+        after = names()
+        self.assertEqual(after[0][1], 3, 'the text of Standalone says it continues Texas Tails, so it joins the set')
+        self.assertEqual(len(after), 1, 'nothing is left over, so there is no "Other stories" group')
+        parent = dialog.tree.topLevelItem(0)
+        self.assertIn('Found in the stories', parent.toolTip(0))
+        self.assertIn('Standalone says', parent.toolTip(0))
+        ticked = [parent.child(i).text(0) for i in range(parent.childCount()) if parent.child(i).checkState(0) == QtCore.Qt.CheckState.Checked]
+        self.assertEqual(len(ticked), 1)
+        self.assertIn('Standalone', ticked[0], 'the story ticked before the scan is still ticked')
+        self.assertEqual(sorted(dialog.texts), sorted(['gay/college/texas-tails', 'gay/highschool/jeremiah', 'gay/camping/standalone']))
+        self.assertIn('contents of 3 read', dialog.summary.text())
+        # reading again finds nothing new to fetch
+        dialog.scan_contents()
+        self.assertIn('already been read', dialog.summary.text())
 
 
 @unittest.skipUnless(HAVE_QT, 'PyQt6 (with its system libraries) is not installed')

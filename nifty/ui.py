@@ -1,6 +1,6 @@
 """Nifty dialogs. Network work never runs on the GUI thread (see guikit.run_task)."""
 from qt.core import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                     QListWidgetItem, QPlainTextEdit, QPushButton, Qt, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
+                     QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, Qt, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
 from calibre_plugins.nifty_downloader import core
 from calibre_plugins.nifty_downloader.config import prefs
@@ -196,6 +196,7 @@ class AuthorDialog(QDialog):
         self.resize(900, 700)
         self.existing = {core.norm_path(e) for e in existing_ids}
         self.authors = []
+        self.texts = {}  # path -> sampled start and end of the story, filled by 'Scan story contents'
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel('Nifty files an author\'s stories under many category folders. This lists them all together. '
                                 'Sets that look like one series are suggested, but they are only suggestions: you decide what to tick.'))
@@ -226,7 +227,7 @@ class AuthorDialog(QDialog):
 
         row = QHBoxLayout()
         for label, slot in (('Tick suggested sets', self.check_suggested), ('Tick everything', lambda: self.check_all(True)),
-                            ('Untick all', lambda: self.check_all(False))):
+                            ('Untick all', lambda: self.check_all(False)), ('Scan story contents for more sets…', self.scan_contents)):
             button = QPushButton(label)
             button.clicked.connect(slot)
             row.addWidget(button)
@@ -238,9 +239,12 @@ class AuthorDialog(QDialog):
         self.skip = QCheckBox('Skip stories already in this library')
         self.skip.setChecked(bool(prefs['skip_existing']))
         layout.addWidget(self.skip)
-        self.combine_series = QCheckBox('Combine each ticked suggested set into one book (otherwise every story is its own book)')
-        self.combine_series.setChecked(True)
-        layout.addWidget(self.combine_series)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Each ticked set becomes:'))
+        self.how = QComboBox()
+        self.how.addItems(['one combined book', 'separate books grouped as a Calibre series', 'separate books'])
+        row.addWidget(self.how, 1)
+        layout.addLayout(row)
         self.combine_all = QCheckBox('Combine everything ticked into one book, titled:')
         self.combine_title = QLineEdit()
         self.combine_title.setEnabled(False)
@@ -295,29 +299,44 @@ class AuthorDialog(QDialog):
     def in_library(self, story):
         return any(e == story['path'] or e.startswith(story['path'] + '/') for e in self.existing)
 
-    def story_item(self, story):
+    def story_item(self, story, ticked=False):
         folder = story['path'].split('/')[1:-1]
         label = f"{story['title']}    [{'/'.join(folder)}]" + ('    (already in library)' if self.in_library(story) else '')
         item = QTreeWidgetItem([label])
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        item.setCheckState(0, Qt.CheckState.Unchecked)
+        item.setCheckState(0, Qt.CheckState.Checked if ticked else Qt.CheckState.Unchecked)
         item.setData(0, Qt.ItemDataRole.UserRole, story)
         return item
 
-    def show_author(self, *_):
+    def ticked_paths(self):
+        paths = set()
+        for parent in self.top_items():
+            for i in range(parent.childCount()):
+                if parent.child(i).checkState(0) == Qt.CheckState.Checked:
+                    paths.add(parent.child(i).data(0, Qt.ItemDataRole.UserRole)['path'])
+        return paths
+
+    def show_author(self, *_, keep=frozenset()):
         author = self.current_author()
         self.tree.blockSignals(True)
         self.tree.clear()
         if author is not None:
-            series, rest = core.suggest_series(self.section_stories(author))
+            stories = self.section_stories(author)
+            if any(s['path'] in self.texts for s in stories):
+                series, rest = core.suggest_series_with_contents(stories, self.texts)
+            else:
+                series, rest = core.suggest_series(stories)
             for entry in series:
                 folders = {core.story_folder(s) for s in entry['stories']}
                 parent = QTreeWidgetItem([f"Suggested set: {entry['name']}  ({len(entry['stories'])} stories in {len(folders)} folder(s))"])
                 parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
-                parent.setToolTip(0, f"Suggested because of {entry['reason']}. Only a suggestion; untick anything that does not belong.")
+                tip = f"Suggested because of {entry['reason']}. Only a suggestion; untick anything that does not belong."
+                if entry.get('evidence'):
+                    tip += '\n\nFound in the stories:\n' + '\n'.join(entry['evidence'])
+                parent.setToolTip(0, tip)
                 parent.setData(0, Qt.ItemDataRole.UserRole, ('series', entry['name']))
                 for story in entry['stories']:
-                    parent.addChild(self.story_item(story))
+                    parent.addChild(self.story_item(story, story['path'] in keep))
                 self.tree.addTopLevelItem(parent)
                 parent.setExpanded(True)
             if rest:
@@ -325,11 +344,38 @@ class AuthorDialog(QDialog):
                 parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
                 parent.setData(0, Qt.ItemDataRole.UserRole, ('rest', ''))
                 for story in sorted(rest, key=lambda s: s['title'].casefold()):
-                    parent.addChild(self.story_item(story))
+                    parent.addChild(self.story_item(story, story['path'] in keep))
                 self.tree.addTopLevelItem(parent)
                 parent.setExpanded(not series)
-            self.summary.setText(f"{author['name']}: {len(self.section_stories(author))} stories, {len(series)} suggested set(s).")
+            scanned = sum(1 for s in stories if s['path'] in self.texts)
+            self.summary.setText(f"{author['name']}: {len(stories)} stories, {len(series)} suggested set(s)"
+                                 + (f'; contents of {scanned} read.' if scanned else '.'))
         self.tree.blockSignals(False)
+
+    def scan_contents(self):
+        author = self.current_author()
+        if author is None:
+            self.summary.setText('Pick an author first.')
+            return
+        stories = self.section_stories(author)
+        todo = [s for s in stories if s['path'] not in self.texts]
+        if not todo:
+            self.summary.setText('The contents of all these stories have already been read.')
+            return
+        requests = sum(3 if s.get('dir') else 2 for s in todo)
+        if QMessageBox.question(
+                self, 'Scan story contents?',
+                f'This reads only the first and last few kilobytes of {len(todo)} stories to look for lines such as "continued from ..." '
+                f'that name another of this author\'s stories. It makes about {requests} requests, taking roughly {requests // 2 + 1} '
+                'seconds; you can cancel and keep what was read.\n\nGo ahead?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        keep = self.ticked_paths()
+        task = run_task(self, 'Reading story openings and endings…', lambda t: core.scan_texts(
+            core.Fetcher(cancelled=t.cancelled), stories, self.texts, lambda msg: setattr(t, 'status', msg)))
+        if task.error:
+            self.summary.setText(f'Scanning failed: {task.error}')
+        self.show_author(keep=keep)
 
     def top_items(self):
         return [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
@@ -357,4 +403,5 @@ class AuthorDialog(QDialog):
                 singles += ticked
         title = self.combine_title.text() if self.combine_all.isChecked() else None
         prefs['skip_existing'] = self.skip.isChecked()
-        return core.build_selection(series_checked, singles, self.combine_series.isChecked(), title)
+        how = {0: True, 1: 'series', 2: False}[self.how.currentIndex()]
+        return core.build_selection(series_checked, singles, how, title)
