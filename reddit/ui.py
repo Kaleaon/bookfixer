@@ -1,12 +1,14 @@
 """Dialogs for following Reddit stories. Network work happens in the action, never here."""
 import time
+import webbrowser
 
 from qt.core import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
                      QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, Qt, QVBoxLayout)
 
-from calibre_plugins.reddit_follower import core
+from calibre_plugins.reddit_follower import core, login
 from calibre_plugins.reddit_follower.config import prefs
 from calibre_plugins.reddit_follower.guikit import run_task
+from calibre_plugins.reddit_follower.storykit import Fetcher
 
 ACCESS_NOTE = (
     'Two ways to read Reddit, and what is known about each:\n'
@@ -15,7 +17,7 @@ ACCESS_NOTE = (
     '(HTTP 429/403); when it does the plugin stops and tries later instead of pushing.\n'
     '• Official API (your own credentials): the route Reddit documents. Reddit now requires approval before new apps get API '
     'access (per its Responsible Builder Policy; I could not confirm the current process from Reddit itself). Register an app of '
-    'type "installed app" or "script" at reddit.com/prefs/apps once approved and enter its client id here. This path is written to '
+    'type "installed app" at reddit.com/prefs/apps once approved, enter its client id here and use Log in with Reddit. This path is written to '
     'Reddit\'s documentation but has not been tried against the live service.'
 )
 
@@ -130,6 +132,22 @@ class SettingsDialog(QDialog):
         form.addRow('Client secret', self.client_secret)
         form.addRow('Reddit username', self.username)
         layout.addLayout(form)
+        self.refresh_token, self.account_name = prefs['refresh_token'], prefs['account_name']
+        row = QHBoxLayout()
+        self.login_button = QPushButton('Log in with Reddit…')
+        self.login_button.setToolTip('Opens Reddit in your browser to approve read access. Your password never reaches this plugin.')
+        self.login_button.clicked.connect(self.log_in)
+        self.logout_button = QPushButton('Log out')
+        self.logout_button.clicked.connect(self.log_out)
+        self.login_status = QLabel('')
+        row.addWidget(self.login_button)
+        row.addWidget(self.logout_button)
+        row.addWidget(self.login_status, 1)
+        layout.addLayout(row)
+        hint = QLabel('Register the app at reddit.com/prefs/apps with redirect uri exactly:  ' + login.REDIRECT_URI)
+        hint.setWordWrap(True)
+        hint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(hint)
         self.api.toggled.connect(self.sync)
         self.sync()
         self.auto = QCheckBox('Check for new chapters automatically while Calibre is open')
@@ -163,12 +181,53 @@ class SettingsDialog(QDialog):
     def sync(self, *_):
         for widget in (self.client_id, self.client_secret, self.username):
             widget.setEnabled(self.api.isChecked())
+        self.login_button.setEnabled(self.api.isChecked())
+        self.logout_button.setEnabled(bool(self.refresh_token))
+        self.login_status.setText(f'Logged in as u/{self.account_name}' if self.refresh_token and self.account_name
+                                  else 'Logged in' if self.refresh_token else 'Not logged in')
+
+    open_browser = staticmethod(webbrowser.open)
+    login_endpoints = {}  # tests point these at a stand-in server
+
+    def log_in(self):
+        client_id, secret = self.client_id.text().strip(), self.client_secret.text().strip()
+        if not client_id:
+            QMessageBox.warning(self, 'Reddit Story Follower', 'Enter your app\'s client id first.')
+            return
+        try:
+            with login.CallbackServer() as server:
+                task = run_task(self, 'Waiting for you to approve the login in your browser…', lambda t: login.log_in(
+                    Fetcher(cancelled=t.cancelled), client_id, secret, server, self.open_browser, t.cancelled,
+                    **{k: v for k, v in self.login_endpoints.items() if k != 'revoke_url'}))
+        except login.LoginError as exc:
+            QMessageBox.warning(self, 'Reddit Story Follower', str(exc))
+            return
+        if task.error:
+            if 'cancelled' not in str(task.error).lower():
+                QMessageBox.warning(self, 'Reddit Story Follower', f'Login failed: {task.error}')
+            return
+        if task.result:
+            self.refresh_token = task.result['refresh_token']
+            self.account_name = task.result['username']
+            prefs['refresh_token'], prefs['account_name'] = self.refresh_token, self.account_name
+            self.sync()
+
+    def log_out(self):
+        if self.refresh_token:
+            revoked = login.revoke(Fetcher(), self.client_id.text().strip(), self.client_secret.text().strip(), self.refresh_token,
+                                   self.login_endpoints.get('revoke_url'))
+            if not revoked:
+                QMessageBox.information(self, 'Reddit Story Follower', 'Reddit could not be reached to cancel the login, so it was only '
+                                        'removed here. You can also remove it at reddit.com/prefs/apps.')
+        self.refresh_token = self.account_name = ''
+        prefs['refresh_token'] = prefs['account_name'] = ''
+        self.sync()
 
     def test_connection(self):
         mode = 'api' if self.api.isChecked() else 'rss'
         client_id, secret, username = self.client_id.text().strip(), self.client_secret.text().strip(), self.username.text().strip()
         src = core.parse_source('r/HFY')
-        task = run_task(self, 'Testing Reddit…', lambda t: core.probe(core.make_source(mode, client_id, secret, username, t.cancelled), src, limit=5))
+        task = run_task(self, 'Testing Reddit…', lambda t: core.probe(core.make_source(mode, client_id, secret, self.account_name or username, t.cancelled, self.refresh_token), src, limit=5))
         if task.error:
             self.test_result.setText(f'The test failed: {task.error}')
         elif task.result is not None:

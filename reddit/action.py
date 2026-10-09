@@ -58,7 +58,8 @@ class FollowerAction(InterfaceAction):
         return len(core.ChapterCache(self.cache_dir(), follow['id']).posts)
 
     def make_source(self, cancelled):
-        return core.make_source(prefs['mode'], prefs['client_id'], prefs['client_secret'], prefs['username'], cancelled)
+        return core.make_source(prefs['mode'], prefs['client_id'], prefs['client_secret'],
+                                 prefs['account_name'] or prefs['username'], cancelled, prefs['refresh_token'])
 
     # -- entry points
     def manage(self):

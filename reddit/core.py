@@ -253,15 +253,17 @@ class FeedSource:
 
 
 class ApiSource:
-    """Reads pages of posts through Reddit's official API with the user's own app credentials.
+    """Reads pages of posts through Reddit's official API with the user's own app.
 
-    With only a client id (an 'installed app') it uses the installed-client grant; with a secret it uses client credentials.
+    With a saved login (a refresh token from "Log in with Reddit") it acts as that account; otherwise with only a client id
+    (an 'installed app') it uses the installed-client grant, and with a secret it uses client credentials.
     Written against Reddit's documented API and tested with a stand-in server; not verified against the live service."""
     mode = 'api'
 
-    def __init__(self, fetcher, client_id, client_secret='', username='', token_url=TOKEN_URL, base=OAUTH):
+    def __init__(self, fetcher, client_id, client_secret='', username='', token_url=None, base=None, refresh_token=''):
         self.fetcher, self.client_id, self.client_secret = fetcher, client_id.strip(), (client_secret or '').strip()
-        self.token_url, self.base = token_url, base
+        self.token_url, self.base = token_url or TOKEN_URL, base or OAUTH
+        self.refresh_token = (refresh_token or '').strip()
         self.user_agent = f"calibre:reddit-follower:1.0 (by /u/{(username or 'unknown').strip().lstrip('/').replace('u/', '')})"
         self._token, self._expires = None, 0.0
         self._device = uuid.uuid4().hex
@@ -270,11 +272,17 @@ class ApiSource:
         if not self.client_id:
             raise SourceError('Enter your Reddit app\'s client id in the settings to use the official API.')
         basic = base64.b64encode(f'{self.client_id}:{self.client_secret}'.encode()).decode()
-        body = (urlencode({'grant_type': 'client_credentials'}) if self.client_secret
-                else urlencode({'grant_type': 'https://oauth.reddit.com/grants/installed_client', 'device_id': self._device}))
+        if self.refresh_token:
+            body = urlencode({'grant_type': 'refresh_token', 'refresh_token': self.refresh_token})
+        elif self.client_secret:
+            body = urlencode({'grant_type': 'client_credentials'})
+        else:
+            body = urlencode({'grant_type': 'https://oauth.reddit.com/grants/installed_client', 'device_id': self._device})
         reply = json.loads(self.fetcher.get(self.token_url, post=body.encode(), headers={
             'Authorization': f'Basic {basic}', 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': self.user_agent}))
         if not reply.get('access_token'):
+            if self.refresh_token:
+                raise SourceError('Reddit no longer accepts the saved login. Open Settings and log in with Reddit again.')
             raise IOError(f"Reddit refused the credentials: {reply.get('error') or reply.get('message') or reply}")
         self._token = reply['access_token']
         self._expires = time.monotonic() + float(reply.get('expires_in', 3600)) - 60
@@ -286,10 +294,11 @@ class ApiSource:
         return parse_listing(text)
 
 
-def make_source(mode, client_id='', client_secret='', username='', cancelled=lambda: False):
+def make_source(mode, client_id='', client_secret='', username='', cancelled=lambda: False, refresh_token=''):
     """The reader for the chosen mode, paced so as to stay within Reddit's limits for that mode."""
     if mode == 'api':
-        return ApiSource(Fetcher(min_interval=MIN_API_INTERVAL, cancelled=cancelled), client_id, client_secret, username)
+        return ApiSource(Fetcher(min_interval=MIN_API_INTERVAL, cancelled=cancelled), client_id, client_secret, username,
+                         refresh_token=refresh_token)
     return FeedSource(Fetcher(min_interval=MIN_FEED_INTERVAL, cancelled=cancelled))
 
 

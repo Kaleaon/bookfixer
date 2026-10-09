@@ -4,6 +4,7 @@ Calibre itself is replaced by small stubs (its preferences store and plain modul
 behaviour, is real. This is what caught the 'finished task looks cancelled' bug that left the tag search empty.
 """
 import builtins
+import http.server
 import importlib
 import io
 import os
@@ -515,6 +516,39 @@ class RedditPluginTests(QtCase):
         prefs = self.config.prefs
         self.assertEqual((prefs['mode'], prefs['client_id'], prefs['username']), ('api', 'abc123', 'Reader'))
         self.assertGreaterEqual(prefs['check_hours'], 1.0, 'never faster than hourly')
+
+    def test_settings_dialog_logs_in_and_out_with_a_simulated_browser(self):
+        import threading
+        import urllib.request
+        from urllib.parse import parse_qs, urlparse
+        login = importlib.import_module(self.package + '.login')
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import test_reddit_login as stand
+        stand.StandIn.log, stand.StandIn.token_reply = [], None
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), stand.StandIn)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        base = f'http://127.0.0.1:{server.server_address[1]}'
+        dialog = self.ui.SettingsDialog(None)
+        self.assertEqual(dialog.login_status.text(), 'Not logged in')
+        self.assertFalse(dialog.logout_button.isEnabled())
+        dialog.api.setChecked(True)
+        dialog.client_id.setText('test-client-id')
+        dialog.login_endpoints = {'token_url': base + '/token', 'base': base, 'revoke_url': base + '/revoke'}
+        dialog.login_endpoints['redirect_uri'] = login.REDIRECT_URI
+
+        def browser(url):
+            state = parse_qs(urlparse(url).query)['state'][0]
+            threading.Thread(target=lambda: urllib.request.urlopen(f'{login.REDIRECT_URI}?code=abc&state={state}').read()).start()
+        dialog.open_browser = browser
+        dialog.log_in()
+        self.assertEqual(RecordingBox.warnings, [])
+        self.assertEqual(dialog.login_status.text(), 'Logged in as u/Reader')
+        self.assertEqual((self.config.prefs['refresh_token'], self.config.prefs['account_name']), ('refresh1', 'Reader'))
+        dialog.log_out()
+        self.assertEqual(self.config.prefs['refresh_token'], '')
+        self.assertEqual(dialog.login_status.text(), 'Not logged in')
+        self.assertTrue(any(path == '/revoke' for path, _, _ in stand.StandIn.log))
 
     def test_manage_dialog_lists_and_removes_follows_and_their_cache(self):
         follow = self.core.new_follow('Series', 'u/writer', 'Chapter')

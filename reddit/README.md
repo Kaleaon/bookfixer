@@ -32,6 +32,14 @@ If you delete a followed book from your library, the next check rebuilds it from
 
 **Settings → Test connection** makes one request to r/HFY with whatever is on screen and tells you whether it worked, without saving anything. Use it, and **Test selected**, to find out on your own computer how Reddit treats the feed or your API credentials: Reddit rate-limits shared and cloud networks much more than a home connection, which is what I ran into while testing.
 
+## Log in with Reddit
+
+In **Settings**, choose the official API, enter your app's client id (and secret, if it is a "web app"), and press **Log in with Reddit…**. Your browser opens Reddit's own approval page; after you approve, Reddit sends the browser back to a small listener on your own computer (`127.0.0.1:8844` only), the plugin trades the one-time code for a login token, and the window says you can close the tab. Your password never reaches the plugin. Only the token is saved (in Calibre's plugin settings on this computer), with read-only scope. **Log out** asks Reddit to cancel it and removes it; you can also remove it at reddit.com/prefs/apps.
+
+Register the app at reddit.com/prefs/apps with the redirect uri exactly `http://127.0.0.1:8844/callback`. Anyone who gets your client secret or saved token could act as that app or read as you, so never paste them into chats, issues or commits; if you have, make a new secret there.
+
+Whether Reddit currently lets you create such an app without approval, and how it treats this login, is not something I could check; this flow is written to Reddit's documented OAuth2 and tested against a stand-in server, not the real service.
+
 ## Two ways to read Reddit, and what is known about each
 
 | | Public feeds (default) | Official API (your own credentials) |
@@ -46,7 +54,7 @@ Choose the API if you have, or can get, approval from Reddit: it is the supporte
 ## What was and was not verified
 
 - Verified against a **real r/HFY feed**: the Atom parser read 25 posts correctly, each with its full story text (4 to 26 KB), author, date and next-page token. Also verified on the real first post of Out of Cruel Space (one post, with its trailing "Next" link removed).
-- **Not verified live**: the search-feed form and the page-by-page backfill (Reddit rate-limited my test requests, and I stopped rather than push it), and the whole **official API path** (no credentials were available). The API code is written to Reddit's documentation and tested against a stand-in server.
+- **Not verified live**: the search-feed form and the page-by-page backfill (Reddit rate-limited my test requests, and I stopped rather than push it), and the whole **official API path and Log in with Reddit** (no credentials were available). The API code is written to Reddit's documentation and tested against a stand-in server.
 - Verified with real Qt and a stand-in Calibre library: creating a book, updating it in place when a chapter arrives, leaving it alone when nothing changed, recreating it after you delete it, backing off after a rate limit, and the automatic background check respecting the schedule. **Not run inside Calibre itself.**
 
 ## Limits
